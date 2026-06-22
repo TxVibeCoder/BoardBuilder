@@ -12,6 +12,9 @@
 import { COMPONENT_ART } from './componentArt';
 import { defaultParams, type BoardComponent, type BoardState, type PinRef } from './boardModel';
 import type { ComponentKind, ComponentParams } from '../../engine/dsp/netlist';
+import { vcoBoard } from './synth/vcoBoard';
+import { ladderBoard } from './synth/ladderBoard';
+import * as adsr from './synth/adsrBoard';
 
 interface PartSpec {
   id: string;
@@ -28,6 +31,8 @@ export interface PremadeCircuit {
   id: string;
   name: string;
   teaches: string;
+  /** Menu grouping label (e.g. 'Pedals & EQ' vs 'Synth'); defaults to the pedal group when unset. */
+  group?: string;
   build: () => BoardState;
 }
 
@@ -176,4 +181,9 @@ export const PREMADE_CIRCUITS: PremadeCircuit[] = [
         ],
       ),
   },
+
+  // --- Synth track (transistor-based: oscillator, filter, envelope/VCA) -----------------------------
+  { ...vcoBoard, group: 'Synth' },
+  { ...ladderBoard, group: 'Synth' },
+  { id: adsr.id, name: adsr.name, teaches: adsr.teaches, build: adsr.build, group: 'Synth' },
 ];

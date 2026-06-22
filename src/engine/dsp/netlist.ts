@@ -35,7 +35,7 @@ export interface ComponentParams {
   amp?: number; // source amplitude (V); for wave 'dc' this is the constant rail voltage
   rsrc?: number; // source series impedance (Ω); small ≈ ideal
   ideal?: boolean; // source: ideal voltage (aux row) instead of Norton
-  wave?: 'sine' | 'guitar' | 'dc'; // source waveform; 'guitar' reads the external input sample; 'dc' = a constant supply rail (Vcc)
+  wave?: 'sine' | 'guitar' | 'dc' | 'noise' | 'pulse'; // source waveform; 'guitar' reads the external input sample; 'dc' = a constant supply rail (Vcc); 'noise' = uniform white noise ±amp; 'pulse' = bipolar square at freq
   bjt?: 'NPN'; // transistor polarity (NPN only for now)
   polarity?: boolean; // electrolytic cap orientation (display/warning only)
 }

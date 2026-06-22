@@ -35,6 +35,10 @@ import {
   type PinRef,
 } from './boardModel';
 import { PREMADE_CIRCUITS } from './premadeBoards';
+import { BiasOverlay } from './BiasOverlay';
+import { downloadBoard, listSlots, loadBoardFromFile, loadSlot, saveSlot } from './boardStorage';
+import { FreqResponse } from '../FreqResponse';
+import { Schematic } from '../Schematic';
 import type { ComponentKind, ComponentParams } from '../../engine/dsp/netlist';
 import type { DiodeId } from '../../engine/dsp/constants';
 import { FLAG_FLOATING, FLAG_NO_RETURN_PATH, FLAG_NONFINITE, FLAG_OPAMP_NO_FEEDBACK } from '../../engine/dsp/mnaSystem';
@@ -56,6 +60,13 @@ const PALETTE: { kind: ComponentKind; label: string }[] = [
   { kind: 'opamp', label: 'Op-Amp' },
   { kind: 'probe', label: 'Probe' },
 ];
+
+/** Premade circuits grouped by their menu group (pedals vs synth) for the Load dropdown's optgroups. */
+const PREMADE_GROUPS: [string, { id: string; name: string }[]][] = (() => {
+  const g: Record<string, { id: string; name: string }[]> = {};
+  for (const c of PREMADE_CIRCUITS) (g[c.group ?? 'Pedals & EQ'] ??= []).push({ id: c.id, name: c.name });
+  return Object.entries(g);
+})();
 
 /** Insulated-wire colours for jumpers, cycled by index so adjacent wires read distinctly. */
 const WIRE_COLORS = ['#d2402f', '#2f7dd2', '#39a85a', '#d99a2b', '#9a52c9', '#23a7b5'];
@@ -123,6 +134,10 @@ export function Board() {
   // jumper-wire drawing: the leg the pending wire started from, and the live cursor for the rubber-band
   const [wireStart, setWireStart] = useState<PinRef | null>(null);
   const [wireCursor, setWireCursor] = useState<{ x: number; y: number } | null>(null);
+  // main-view switch (build canvas / schematic / frequency response) + DC-bias overlay toggle
+  const [view, setView] = useState<'board' | 'schematic' | 'response'>('board');
+  const [showBias, setShowBias] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const boardRef = useRef(board);
   boardRef.current = board;
@@ -138,6 +153,8 @@ export function Board() {
   const rafRef = useRef<number | null>(null);
 
   const eyelets = useMemo(() => computeEyelets(board), [board]);
+  // derived netlist for the analysis views (recomputed only when the board changes)
+  const analysisNet = useMemo(() => toNetlist(board), [board]);
 
   /** Push the current board to the worklet — authoritative in BOTH directions: load the derived netlist
    *  when playable, otherwise unload so a now-incomplete board (e.g. its source/probe was deleted) goes
@@ -235,6 +252,32 @@ export function Board() {
     if (boardRef.current.components.length && !window.confirm(`Load "${c.name}"? This replaces the current board.`)) return;
     setWireStart(null);
     commit(c.build(), null);
+  };
+
+  // ---- save / load (BoardState is the single source of truth — see boardStorage) ----------------
+  const exportBoard = () => downloadBoard(boardRef.current);
+  const importBoard = async (file: File) => {
+    try {
+      commit(await loadBoardFromFile(file), null);
+    } catch (err) {
+      window.alert(`Import failed: ${(err as Error).message}`);
+    }
+  };
+  const saveBoard = () => {
+    const name = window.prompt('Save board as:');
+    if (name) saveSlot(name, boardRef.current);
+  };
+  const loadSaved = () => {
+    const names = listSlots();
+    if (!names.length) {
+      window.alert('No saved boards yet — use Save first.');
+      return;
+    }
+    const name = window.prompt(`Load which board?\n${names.join(', ')}`, names[0]);
+    if (!name) return;
+    const b = loadSlot(name);
+    if (b) commit(b, null);
+    else window.alert(`No saved board "${name}".`);
   };
 
   // Click a leg/eyelet to start a wire; click another to finish it (a jumper between the two nodes).
@@ -437,10 +480,14 @@ export function Board() {
           title="Load a ready-made circuit onto the board"
         >
           <option value="">📂 Load a circuit…</option>
-          {PREMADE_CIRCUITS.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
+          {PREMADE_GROUPS.map(([group, circuits]) => (
+            <optgroup key={group} label={group}>
+              {circuits.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
         <span className="spacer" />
@@ -459,11 +506,49 @@ export function Board() {
         <button className="add" onClick={clearBoard} title="Clear the whole board">
           ✦ New
         </button>
+        <span className="spacer" />
+        <button className={`add ${view === 'board' ? 'on' : ''}`} onClick={() => setView('board')} title="Build canvas">
+          Board
+        </button>
+        <button className={`add ${view === 'schematic' ? 'on' : ''}`} onClick={() => setView('schematic')} title="Schematic of the same circuit">
+          Schematic
+        </button>
+        <button className={`add ${view === 'response' ? 'on' : ''}`} onClick={() => setView('response')} title="Frequency response (Bode magnitude)">
+          Response
+        </button>
+        <button className={`add ${showBias ? 'on' : ''}`} disabled={view !== 'board'} onClick={() => setShowBias((v) => !v)} title="Overlay DC operating-point voltages">
+          Bias
+        </button>
+        <span className="spacer" />
+        <button className="add" onClick={saveBoard} title="Save to a named slot">
+          Save
+        </button>
+        <button className="add" onClick={loadSaved} title="Open a saved board">
+          Open
+        </button>
+        <button className="add" onClick={exportBoard} title="Download as a .json file">
+          Export
+        </button>
+        <button className="add" onClick={() => fileInputRef.current?.click()} title="Import a .json board file">
+          Import
+        </button>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json,.json"
+          style={{ display: 'none' }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void importBoard(f);
+            e.currentTarget.value = '';
+          }}
+        />
         <button className={`play ${playing ? 'stop' : ''}`} onClick={() => (playing ? stop() : void start())}>
           {playing ? '■ Stop' : '▶ Play'}
         </button>
       </div>
 
+      {view === 'board' && (
       <svg
         ref={svgRef}
         className="board"
@@ -534,8 +619,14 @@ export function Board() {
             <circle cx={wireStartPos.x} cy={wireStartPos.y} r={1.5} fill="none" stroke="#39e06a" strokeWidth={0.5} />
           </>
         )}
+        {showBias && <BiasOverlay board={board} />}
       </svg>
+      )}
 
+      {view === 'schematic' && <Schematic board={board} />}
+      {view === 'response' && <FreqResponse netlist={analysisNet} />}
+
+      {view === 'board' && (
       <div className="board-hint">
         {wireStart ? (
           <b>Wire mode: click another eyelet to connect, or press Esc to cancel.</b>
@@ -554,6 +645,7 @@ export function Board() {
         {dupSource && <span className="badge">⚠ multiple signal sources — only the first sets ground</span>}
         {dupProbe && <span className="badge">⚠ multiple probes — only the first is scoped</span>}
       </div>
+      )}
 
       <canvas ref={canvasRef} className="scope board-scope" width={SCOPE_W} height={SCOPE_H} />
 

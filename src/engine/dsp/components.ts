@@ -118,13 +118,18 @@ class SourceStamper implements Stamper {
   loadDynamic(ctx: StampContext): void {
     const p = this.spec.params;
     const wave = p.wave ?? 'sine';
-    // 'guitar' tracks the live input; 'dc' is a constant supply rail (Vcc); else a free-running sine.
+    const amp = p.amp ?? 1;
+    // 'guitar' tracks the live input; 'dc' is a constant supply rail (Vcc); 'noise' is uniform white
+    // noise ±amp; 'pulse' is a bipolar square (±amp) off the same free-running phase as 'sine'; else sine.
     let vs: number;
-    if (wave === 'guitar') vs = ctx.extIn * (p.amp ?? 1);
-    else if (wave === 'dc') vs = p.amp ?? 1;
-    else vs = (p.amp ?? 1) * Math.sin(this.phase);
+    if (wave === 'guitar') vs = ctx.extIn * amp;
+    else if (wave === 'dc') vs = amp;
+    else if (wave === 'noise') vs = amp * (2 * Math.random() - 1);
+    else if (wave === 'pulse') vs = this.phase < Math.PI ? amp : -amp;
+    else vs = amp * Math.sin(this.phase);
     ctx.addI(this.nodes[0]!, this.nodes[1]!, vs * this.g());
-    if (wave === 'sine') {
+    // Advance the shared phase accumulator for the periodic waveforms only (sine + pulse).
+    if (wave === 'sine' || wave === 'pulse') {
       const twoPi = 2 * Math.PI;
       this.phase += twoPi * (p.freq ?? 1000) * ctx.dt;
       if (this.phase >= twoPi) this.phase %= twoPi;
