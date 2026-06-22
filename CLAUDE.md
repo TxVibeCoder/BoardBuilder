@@ -61,11 +61,16 @@ Named **BoardBuilder** (decided 2026-06-22).
   messages); `data/starterCircuits.ts` = the six §9 circuits as loadable netlists with live knobs; and
   `ui/CircuitDemo.tsx` is the live demo (pick a circuit → Play → scope shows input vs probe → turn a
   knob and it changes in lock-step — verified in-browser). **68 tests pass; typecheck + build green.**
-- **Board assets — built ahead.** `ui/board/artTypes.ts` + `ui/board/art/{passives,active}.ts` —
-  parametric, value-driven SVG renderers (resistor color bands from R, electrolytic, diode, op-amp
-  DIP-8, pot, source, probe) with lead-anchor pins in netlist order, for the eyelet board.
+- **Eyelet board — done (v1).** `ui/board/boardModel.ts` is the pure source of truth: components have
+  body positions; pins land at the art's lead anchors; pins within `SNAP_MM` cluster (union-find) into
+  one eyelet (= one node) — the snap-merge — and `toNetlist()` derives the engine netlist from the
+  geometry. `ui/board/Board.tsx` is the interactive SVG board (palette → drop → drag → snap-merge →
+  split, a value editor per part, live audio via the worklet relatched on drag-end, scope, and live
+  teaching badges). `ui/App.tsx` tabs between **Build** (the board) and **Examples** (`CircuitDemo`).
+  Component art renders via `<image>` data-URIs. **Verified in-browser:** drag, gold-eyelet snap-merge,
+  split, live audio (scope shows the signal), and the floating-node teaching badge. **72 tests pass.**
 
-**Next:** the interactive **eyelet board** — drop a component → eyelets appear at its pins → drag →
-snap-merge legs into one node → split; derive the netlist from the board geometry; jumper wires
-(reuse SynthStack `CableLayer`); a probe you clip onto an eyelet. Then Phase 2 instrumentation
-(frequency-response + DC-bias views, save/load).
+**Known v1 gaps / next:** parts are small at the fixed zoom (add zoom + pan, snap-highlight during
+drag); explicit **jumper wires** between distant eyelets (reuse SynthStack `CableLayer`); rotate;
+a synced schematic view; then Phase 2 instrumentation (frequency-response + DC-bias views, save/load
+via the netlist round-trip).

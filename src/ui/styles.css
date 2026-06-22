@@ -176,3 +176,116 @@ header .sub {
   font-weight: 600;
   font-size: 12px;
 }
+
+/* ---- top bar + tabs ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 16px 20px 0;
+}
+
+.brand {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.tabs {
+  display: inline-flex;
+  border: 1px solid #4a3826;
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.tabs button {
+  background: transparent;
+  color: var(--muted);
+  border: 0;
+  padding: 7px 16px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tabs button.on {
+  background: var(--brass);
+  color: #1a1208;
+  font-weight: 600;
+}
+
+/* ---- eyelet board ---- */
+.board-wrap {
+  max-width: 1120px;
+}
+
+.board-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.board-bar .spacer {
+  flex: 1;
+}
+
+.add {
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid #3a2c1c;
+  border-radius: 6px;
+  padding: 7px 11px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.add:hover {
+  border-color: var(--brass);
+}
+
+.add:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.board {
+  width: 100%;
+  display: block;
+  border: 1px solid #3a2c1c;
+  border-radius: 8px;
+  background: #1d150c;
+  touch-action: none;
+}
+
+.board-hint {
+  margin: 10px 2px 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.board-hint b {
+  color: var(--ink);
+}
+
+.board-hint .badge {
+  margin-left: 8px;
+}
+
+.board-scope {
+  height: 200px;
+}
+
+.ctl-head {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 6px;
+  grid-column: 1 / -1;
+}
+
+.ctl-head code {
+  color: var(--brass);
+}
