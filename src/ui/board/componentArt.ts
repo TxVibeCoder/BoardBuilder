@@ -7,7 +7,7 @@
 import type { ComponentKind } from '../../engine/dsp/netlist';
 import type { ArtRenderer } from './artTypes';
 import { capacitorArt, diodeArt, resistorArt } from './art/passives';
-import { opampArt, potArt, probeArt, sourceArt } from './art/active';
+import { bjtArt, opampArt, potArt, probeArt, sourceArt } from './art/active';
 
 export const COMPONENT_ART: Partial<Record<ComponentKind, ArtRenderer>> = {
   resistor: resistorArt,
@@ -15,6 +15,7 @@ export const COMPONENT_ART: Partial<Record<ComponentKind, ArtRenderer>> = {
   diode: diodeArt,
   opamp: opampArt,
   pot: potArt,
+  bjt: bjtArt,
   source: sourceArt,
   probe: probeArt,
 };

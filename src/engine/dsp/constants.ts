@@ -23,3 +23,17 @@ export const RMIN = 1e-3; // a 0-Ω resistor/short ⇒ large-but-finite conducta
 export const TRAP_SAFE = 1.0; // cap τ/dt ≥ this ⇒ trapezoidal companion, else backward-Euler
 export const DEFAULT_VSAT = 9.0; // op-amp output rail (V), settable per part
 export const NMAX = 32; // preallocated MNA system dimension cap (relatch re-allocs above this)
+
+/**
+ * Bipolar-junction-transistor (Ebers-Moll) teaching model. Nominal small-signal NPN values (≈ a
+ * 2N3904 / BC547 in direction + rough magnitude — the §2 fidelity bar, not SPICE-grade): a large
+ * forward current gain, a small reverse gain, and a saturation current that puts the base-emitter
+ * knee near ~0.65 V at ~1 mA. βR is deliberately small (the reverse-active region is poor in a real
+ * BJT) and keeps the saturation region well-behaved for Newton.
+ */
+export interface BjtModel {
+  is: number; // transport saturation current Is (A)
+  betaF: number; // forward current gain βF
+  betaR: number; // reverse current gain βR
+}
+export const BJT_NPN: BjtModel = { is: 1e-14, betaF: 200, betaR: 2 };

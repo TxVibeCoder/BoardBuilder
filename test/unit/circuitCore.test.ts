@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { CircuitCore } from '../../src/engine/dsp/circuitCore';
 import { DiodeClipperCore } from '../../src/engine/dsp/diodeClipperCore';
-import { FLAG_FLOATING, FLAG_OPAMP_NO_FEEDBACK } from '../../src/engine/dsp/mnaSystem';
-import type { ComponentSpec, Netlist } from '../../src/engine/dsp/netlist';
+import { FLAG_FLOATING, FLAG_NO_RETURN_PATH, FLAG_NONFINITE, FLAG_OPAMP_NO_FEEDBACK } from '../../src/engine/dsp/mnaSystem';
+import { probeHasNoReturnPath, type ComponentSpec, type Netlist } from '../../src/engine/dsp/netlist';
 import { db, fftMag, magAtHz } from '../helpers/spectral';
 
 const FS = 48000;
@@ -301,6 +301,43 @@ describe('CircuitCore — review-hardening regressions', () => {
     expect(Math.abs(b[0]! - a[half - 1]!)).toBeLessThan(0.1);
   });
 
+  it('NO-RETURN-PATH teaching badge: series part with no path to ground carries no current', () => {
+    // The reported bug: source → resistor → probe in a line. The probe draws no current, so the
+    // series R drops nothing — output ≈ source and turning R does nothing. Fire the teaching cue.
+    const dead = net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), probe('n2')]);
+    expect(probeHasNoReturnPath(dead)).toBe(true);
+    const core = new CircuitCore(dead);
+    expect(core.flags & FLAG_NO_RETURN_PATH).not.toBe(0); // surfaced from topology, before any solve
+    expect(dc(core, 1)).toBeCloseTo(1, 3); // and it still plays — the source passes straight through
+    expect(core.flags & FLAG_NO_RETURN_PATH).not.toBe(0); // survives the per-sample mna.flags reset
+
+    // two series resistors are just as dead; a series cap (no return path) is too
+    expect(probeHasNoReturnPath(net([guitarSrc('S', 'n1', 'gnd'), R('R1', 'n1', 'n2', 1000), R('R2', 'n2', 'n3', 1000), probe('n3')]))).toBe(true);
+    expect(probeHasNoReturnPath(net([guitarSrc('S', 'n1', 'gnd'), C('C', 'n1', 'n2', 1e-7), probe('n2')]))).toBe(true);
+  });
+
+  it('NO-RETURN-PATH does NOT fire on real working circuits (no false positives)', () => {
+    const opamp = (id: string, plus: string, minus: string, out: string): ComponentSpec => ({ id, kind: 'opamp', pins: [plus, minus, out], params: { vsat: 9 } });
+    const cases: [string, Netlist][] = [
+      ['divider', net([guitarSrc('S', 'n1', 'gnd'), R('R1', 'n1', 'n2', 1000), R('R2', 'n2', 'gnd', 3000), probe('n2')])],
+      ['RC low-pass (cap is a path to gnd)', net([sineSrc('S', 'n1', 'gnd', 1000), R('R', 'n1', 'n2', 1591.55), C('C', 'n2', 'gnd', 1e-7), probe('n2')])],
+      ['RC high-pass', net([sineSrc('S', 'n1', 'gnd', 1000), C('C', 'n1', 'n2', 1e-7), R('R', 'n2', 'gnd', 1591.55), probe('n2')])],
+      ['diode clipper', net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), D('D', 'n2', 'gnd', true), probe('n2')])],
+      ['op-amp gain (driven output, out of scope)', net([guitarSrc('S', 'in', 'gnd'), opamp('U', 'in', 'm', 'out'), R('Rf', 'out', 'm', 100000), R('Rg', 'm', 'gnd', 10000), probe('out')])],
+      ['shunt R, probe on the source node (not this badge)', net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'gnd', 1000), probe('n1')])],
+      ['bare source → probe (nothing in series yet)', net([guitarSrc('S', 'n1', 'gnd'), probe('n1')])],
+    ];
+    for (const [name, nl] of cases) expect(probeHasNoReturnPath(nl), name).toBe(false);
+  });
+
+  it('NO-RETURN-PATH clears when a ground leg turns the series part into a divider', () => {
+    const core = new CircuitCore(net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), probe('n2')]));
+    expect(core.flags & FLAG_NO_RETURN_PATH).not.toBe(0);
+    core.setNetlist(net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), R('R2', 'n2', 'gnd', 4700), probe('n2')]));
+    expect(core.flags & FLAG_NO_RETURN_PATH).toBe(0); // resolved → badge no longer latched
+    expect(dc(core, 2)).toBeCloseTo(1, 2); // and now it divides: 2 V × 4.7k/9.4k
+  });
+
   it('the FLOATING badge reflects current state — it clears when the float is removed', () => {
     const floating = net([guitarSrc('S', 'n1', 'gnd'), R('R1', 'n1', 'n2', 1000), R('R2', 'n2', 'gnd', 1000), probe('n2'), R('STRAY', 'x', 'y', 1000)]);
     const core = new CircuitCore(floating);
@@ -309,5 +346,58 @@ describe('CircuitCore — review-hardening regressions', () => {
     core.setNetlist(net([guitarSrc('S', 'n1', 'gnd'), R('R1', 'n1', 'n2', 1000), R('R2', 'n2', 'gnd', 1000), probe('n2')]));
     dc(core, 2);
     expect(core.flags & FLAG_FLOATING).toBe(0); // resolved condition no longer latched
+  });
+});
+
+const bjt = (id: string, c: string, b: string, e: string): ComponentSpec => ({ id, kind: 'bjt', pins: [c, b, e], params: { bjt: 'NPN' } });
+const dcSrc = (id: string, hot: string, gnd: string, v: number): ComponentSpec => ({ id, kind: 'source', pins: [hot, gnd], params: { wave: 'dc', amp: v, rsrc: 1e-3 } });
+
+describe('CircuitCore — BJT (Ebers-Moll) common-emitter amplifier', () => {
+  // Vcc=9, base divider, Rc=4.7k, Re=1k (unbypassed) ⇒ mid-rail bias, gain ≈ −Rc/Re ≈ −4.7
+  const ce = (): Netlist =>
+    net([
+      dcSrc('VCC', 'vcc', 'gnd', 9),
+      guitarSrc('SIG', 'vin', 'gnd'),
+      C('Cin', 'vin', 'base', 1e-6),
+      R('R1', 'vcc', 'base', 47000),
+      R('R2', 'base', 'gnd', 10000),
+      R('Rc', 'vcc', 'col', 4700),
+      R('Re', 'emit', 'gnd', 1000),
+      bjt('Q', 'col', 'base', 'emit'),
+      probe('col'),
+    ]);
+
+  it('biases to a sane DC operating point (collector mid-rail, BE junction conducting), fault-free', () => {
+    const core = new CircuitCore(ce(), FS, { oversample: 1 });
+    core.reset();
+    const n = 6000; // let the input cap / bias settle
+    core.processBlock(new Float64Array(n), new Float64Array(n), n);
+    expect(core.nodeVoltage('col')).toBeGreaterThan(2.5); // active region…
+    expect(core.nodeVoltage('col')).toBeLessThan(8); // …not slammed to a rail
+    expect(core.nodeVoltage('base')).toBeGreaterThan(1.2);
+    expect(core.nodeVoltage('emit')).toBeGreaterThan(0.4); // emitter lifts off ground ⇒ forward-active
+    expect(core.flags & (FLAG_FLOATING | FLAG_NONFINITE)).toBe(0);
+  });
+
+  it('provides voltage gain ≫ 1 (collector AC swing several × the input)', () => {
+    const core = new CircuitCore(ce(), FS, { oversample: 1 });
+    core.reset();
+    const N = 9600;
+    const inb = new Float64Array(N);
+    for (let i = 0; i < N; i++) inb[i] = 0.05 * Math.sin((2 * Math.PI * 500 * i) / FS);
+    const out = new Float64Array(N);
+    core.processBlock(inb, out, N);
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (let i = N - 2400; i < N; i++) {
+      if (out[i]! < mn) mn = out[i]!;
+      if (out[i]! > mx) mx = out[i]!;
+    }
+    expect((mx - mn) / (2 * 0.05)).toBeGreaterThan(3); // a real boost (≈ Rc/Re ≈ 4.7×)
+  });
+
+  it('builds without a stamper throw and round-trips the bjt kind through getState', () => {
+    const core = new CircuitCore(ce());
+    expect(core.getState().components.some((c) => c.kind === 'bjt')).toBe(true);
   });
 });

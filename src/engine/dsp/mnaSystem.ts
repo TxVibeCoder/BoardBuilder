@@ -14,6 +14,10 @@ export const FLAG_FLOATING = 1;
 export const FLAG_NONCONVERGED = 2;
 export const FLAG_NONFINITE = 4;
 export const FLAG_OPAMP_NO_FEEDBACK = 8;
+/** Teaching cue, not a solver fault: the probe is pinned to the source through a series part with no
+ *  return path to ground, so that part carries no current and changes nothing. Set by circuitCore from
+ *  the topology (see netlist.probeHasNoReturnPath); never touched by the per-sample solve. */
+export const FLAG_NO_RETURN_PATH = 16;
 
 export class MnaSystem {
   private cap: number;

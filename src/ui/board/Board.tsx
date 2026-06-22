@@ -12,27 +12,36 @@ import type { ComponentArt } from './artTypes';
 import { artFor } from './componentArt';
 import {
   addComponent,
+  addJumper,
   applyDropSnap,
+  BOARD_H_MM,
+  BOARD_W_MM,
   clusterSignature,
   computeEyelets,
   emptyBoard,
+  findFreeSlot,
   isPlayable,
   moveComponent,
   pinsOf,
   removeComponent,
+  resolvePinRef,
+  rotateComponent,
   SNAP_MM,
   toNetlist,
   updateParams,
   type BoardComponent,
+  type BoardPin,
   type BoardState,
+  type PinRef,
 } from './boardModel';
+import { PREMADE_CIRCUITS } from './premadeBoards';
 import type { ComponentKind, ComponentParams } from '../../engine/dsp/netlist';
 import type { DiodeId } from '../../engine/dsp/constants';
-import { FLAG_FLOATING, FLAG_NONFINITE, FLAG_OPAMP_NO_FEEDBACK } from '../../engine/dsp/mnaSystem';
+import { FLAG_FLOATING, FLAG_NO_RETURN_PATH, FLAG_NONFINITE, FLAG_OPAMP_NO_FEEDBACK } from '../../engine/dsp/mnaSystem';
 import { formatOhms } from '../../engine/units';
 
-const BOARD_W = 160; // mm
-const BOARD_H = 92;
+const BOARD_W = BOARD_W_MM; // mm
+const BOARD_H = BOARD_H_MM;
 const SRC_HZ = 110;
 const SCOPE_W = 1600;
 const SCOPE_H = 320;
@@ -42,15 +51,33 @@ const PALETTE: { kind: ComponentKind; label: string }[] = [
   { kind: 'resistor', label: 'Resistor' },
   { kind: 'capacitor', label: 'Capacitor' },
   { kind: 'diode', label: 'Diode' },
+  { kind: 'bjt', label: 'Transistor' },
   { kind: 'pot', label: 'Pot' },
   { kind: 'opamp', label: 'Op-Amp' },
   { kind: 'probe', label: 'Probe' },
 ];
 
+/** Insulated-wire colours for jumpers, cycled by index so adjacent wires read distinctly. */
+const WIRE_COLORS = ['#d2402f', '#2f7dd2', '#39a85a', '#d99a2b', '#9a52c9', '#23a7b5'];
+
+/** A gently-sagging wire path between two board points (mm). */
+function wirePath(ax: number, ay: number, bx: number, by: number): string {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len = Math.hypot(dx, dy) || 1;
+  const sag = Math.min(7, len * 0.14);
+  const nx = -dy / len;
+  const ny = dx / len;
+  const mx = (ax + bx) / 2 + nx * sag;
+  const my = (ay + by) / 2 + ny * sag;
+  return `M${ax} ${ay} Q ${mx} ${my} ${bx} ${by}`;
+}
+
 const FLAG_BADGES: { bit: number; text: string }[] = [
   { bit: FLAG_FLOATING, text: 'floating node — a leg has no connection' },
   { bit: FLAG_OPAMP_NO_FEEDBACK, text: 'op-amp has no feedback path' },
   { bit: FLAG_NONFINITE, text: 'circuit unsolvable as wired' },
+  { bit: FLAG_NO_RETURN_PATH, text: 'no current path — the probe just reads the source. Add a resistor from here to ground (a divider) so this part changes the signal' },
 ];
 
 function makeLimiterCurve(samples = 1024): Float32Array {
@@ -93,6 +120,9 @@ export function Board() {
   const [selected, setSelected] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [flags, setFlags] = useState(0);
+  // jumper-wire drawing: the leg the pending wire started from, and the live cursor for the rubber-band
+  const [wireStart, setWireStart] = useState<PinRef | null>(null);
+  const [wireCursor, setWireCursor] = useState<{ x: number; y: number } | null>(null);
 
   const boardRef = useRef(board);
   boardRef.current = board;
@@ -142,6 +172,7 @@ export function Board() {
   };
 
   const onMove = (e: React.PointerEvent) => {
+    if (wireStart) setWireCursor(clientToBoard(e)); // rubber-band the pending wire toward the cursor
     const d = dragRef.current;
     if (!d) return;
     const p = clientToBoard(e);
@@ -168,25 +199,60 @@ export function Board() {
     }
   };
 
+  const commit = (next: BoardState, sel?: string | null): void => {
+    boardRef.current = next;
+    setBoard(next);
+    if (sel !== undefined) setSelected(sel);
+    relatch();
+  };
+
   const addPart = (kind: ComponentKind) => {
     const b = boardRef.current;
-    // spread new parts across the board (4 columns) so they land clearly separated, never overlapping
-    const i = b.components.length;
-    const spawnX = 18 + (i % 4) * 34;
-    const spawnY = 16 + Math.floor(i / 4) * 22;
-    const next = addComponent(b, kind, spawnX, spawnY);
-    setBoard(next);
-    setSelected(next.components[next.components.length - 1]!.id);
-    boardRef.current = next;
-    relatch();
+    const slot = findFreeSlot(b, kind); // auto-place in a clear spot so parts never spawn overlapping
+    const next = addComponent(b, kind, slot.x, slot.y);
+    commit(next, next.components[next.components.length - 1]!.id);
   };
 
   const deleteSelected = () => {
     if (!selected) return;
-    setBoard((b) => removeComponent(b, selected));
-    boardRef.current = removeComponent(boardRef.current, selected);
-    setSelected(null);
-    relatch();
+    commit(removeComponent(boardRef.current, selected), null);
+  };
+
+  const rotateSelected = () => {
+    if (!selected) return;
+    commit(rotateComponent(boardRef.current, selected)); // pin positions move ⇒ relatch rebuilds topology
+  };
+
+  const clearBoard = () => {
+    if (boardRef.current.components.length && !window.confirm('Clear the board?')) return;
+    setWireStart(null);
+    commit(emptyBoard(), null);
+  };
+
+  const loadPremade = (id: string) => {
+    const c = PREMADE_CIRCUITS.find((p) => p.id === id);
+    if (!c) return;
+    if (boardRef.current.components.length && !window.confirm(`Load "${c.name}"? This replaces the current board.`)) return;
+    setWireStart(null);
+    commit(c.build(), null);
+  };
+
+  // Click a leg/eyelet to start a wire; click another to finish it (a jumper between the two nodes).
+  const onEyeletDown = (e: React.PointerEvent, pins: BoardPin[]) => {
+    e.stopPropagation();
+    const rep = pins[0];
+    if (!rep) return;
+    const ref: PinRef = { componentId: rep.componentId, pinIndex: rep.pinIndex };
+    if (!wireStart) {
+      setWireStart(ref);
+      setWireCursor({ x: rep.x, y: rep.y });
+      setSelected(null);
+    } else {
+      const next = addJumper(boardRef.current, wireStart, ref);
+      setWireStart(null);
+      setWireCursor(null);
+      if (next !== boardRef.current) commit(next, null);
+    }
   };
 
   const onParam = (id: string, params: Partial<ComponentParams>) => {
@@ -311,10 +377,35 @@ export function Board() {
 
   useEffect(() => () => void ctxRef.current?.close(), []);
 
+  // keyboard: Esc cancels a pending wire / deselects; R rotates and Del/Backspace deletes the selection
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const t = e.target as HTMLElement | null;
+      const typing = t != null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+      if (e.key === 'Escape') {
+        setWireStart(null);
+        setWireCursor(null);
+        setSelected(null);
+      } else if (!typing && (e.key === 'r' || e.key === 'R') && selected) {
+        e.preventDefault();
+        commit(rotateComponent(boardRef.current, selected));
+      } else if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && selected) {
+        e.preventDefault();
+        commit(removeComponent(boardRef.current, selected), null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
+
   const sel = board.components.find((c) => c.id === selected) ?? null;
   const activeFlags = FLAG_BADGES.filter((f) => (flags & f.bit) !== 0);
-  const dupSource = board.components.filter((c) => c.kind === 'source').length > 1;
+  // A DC source is a supply rail (Vcc), not a second signal source — don't warn about it.
+  const dupSource = board.components.filter((c) => c.kind === 'source' && (c.params.wave ?? 'guitar') !== 'dc').length > 1;
   const dupProbe = board.components.filter((c) => c.kind === 'probe').length > 1;
+  const jumpers = board.components.filter((c) => c.kind === 'jumper');
+  const wireStartPos = wireStart ? resolvePinRef(board, wireStart) : null;
 
   // while dragging, mark the legs the moving part will snap onto if released now (catch-range feedback)
   const dragId = dragRef.current?.id;
@@ -336,14 +427,37 @@ export function Board() {
   return (
     <div className="wrap board-wrap">
       <div className="board-bar">
+        <select
+          className="add"
+          value=""
+          onChange={(e) => {
+            if (e.target.value) loadPremade(e.target.value);
+            e.target.value = '';
+          }}
+          title="Load a ready-made circuit onto the board"
+        >
+          <option value="">📂 Load a circuit…</option>
+          {PREMADE_CIRCUITS.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
+        <span className="spacer" />
         {PALETTE.map((p) => (
           <button key={p.kind} className="add" onClick={() => addPart(p.kind)}>
             + {p.label}
           </button>
         ))}
         <span className="spacer" />
-        <button className="add" disabled={!selected} onClick={deleteSelected}>
+        <button className="add" disabled={!selected || sel?.kind === 'jumper'} onClick={rotateSelected} title="Rotate selected (R)">
+          ⟳ Rotate
+        </button>
+        <button className="add" disabled={!selected} onClick={deleteSelected} title="Delete selected (Del)">
           🗑 Delete
+        </button>
+        <button className="add" onClick={clearBoard} title="Clear the whole board">
+          ✦ New
         </button>
         <button className={`play ${playing ? 'stop' : ''}`} onClick={() => (playing ? stop() : void start())}>
           {playing ? '■ Stop' : '▶ Play'}
@@ -359,48 +473,85 @@ export function Board() {
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
-        onPointerDown={() => setSelected(null)}
+        onPointerDown={() => {
+          setSelected(null);
+          setWireStart(null);
+          setWireCursor(null);
+        }}
       >
         <rect x={0} y={0} width={BOARD_W} height={BOARD_H} fill="#c8a86a" rx={2} />
+        {/* jumper wires (logical connections), drawn under the parts; click one to select it */}
+        {jumpers.map((j, i) => {
+          if (!j.link) return null;
+          const a = resolvePinRef(board, j.link.a);
+          const b = resolvePinRef(board, j.link.b);
+          if (!a || !b) return null;
+          const d = wirePath(a.x, a.y, b.x, b.y);
+          const sel = selected === j.id;
+          return (
+            <g key={j.id} style={{ cursor: 'pointer' }} onPointerDown={(e) => { e.stopPropagation(); setSelected(j.id); setWireStart(null); }}>
+              <path d={d} fill="none" stroke="#160f07" strokeWidth={1.2} strokeOpacity={0.45} strokeLinecap="round" />
+              <path d={d} fill="none" stroke={sel ? '#ffffff' : WIRE_COLORS[i % WIRE_COLORS.length]} strokeWidth={sel ? 0.95 : 0.7} strokeLinecap="round" />
+            </g>
+          );
+        })}
         {/* board-level leads: each pin soldered to its eyelet centroid */}
         {eyelets.flatMap((e) =>
           e.pins.map((p) => <line key={`${p.componentId}:${p.pinIndex}-lead`} x1={p.x} y1={p.y} x2={e.x} y2={e.y} stroke="#c9cdd2" strokeWidth={0.4} strokeLinecap="round" />),
         )}
-        {/* components */}
+        {/* components (rotated about their art centre so legs and body stay aligned) */}
         {board.components.map((c) => {
           const art = artFor(c.kind)?.(c.params);
           if (!art) return null;
+          const rot = c.rot ?? 0;
+          const xf = rot ? `rotate(${rot} ${c.x + art.width / 2} ${c.y + art.height / 2})` : undefined;
           return (
-            <g key={c.id}>
+            <g key={c.id} transform={xf}>
               <image href={artUri(art)} x={c.x} y={c.y} width={art.width} height={art.height} />
               {selected === c.id && <rect x={c.x - 0.6} y={c.y - 0.6} width={art.width + 1.2} height={art.height + 1.2} fill="none" stroke="#e0552b" strokeWidth={0.4} strokeDasharray="1.2 0.8" rx={0.8} />}
               <rect x={c.x} y={c.y} width={art.width} height={art.height} fill="transparent" style={{ cursor: 'grab' }} onPointerDown={(e) => startDrag(e, c.id)} />
             </g>
           );
         })}
-        {/* eyelets on top: gold solder blob (≥2 legs) or open brass ring (1 leg) */}
-        {eyelets.map((e) =>
-          e.pins.length >= 2 ? (
-            <circle key={e.id} cx={e.x} cy={e.y} r={1.15} fill="#e8b54a" stroke="#8a6420" strokeWidth={0.25} />
-          ) : (
-            <circle key={e.id} cx={e.x} cy={e.y} r={1.0} fill="#1d150c" stroke="#caa15a" strokeWidth={0.45} />
-          ),
-        )}
-        {/* live "release here to connect" markers while dragging */}
+        {/* eyelets on top: gold solder blob (≥2 legs) or open brass ring (1 leg). Click to wire. */}
+        {eyelets.map((e) => {
+          const merged = e.pins.length >= 2;
+          return (
+            <g key={e.id} style={{ cursor: 'crosshair' }} onPointerDown={(ev) => onEyeletDown(ev, e.pins)}>
+              {wireStart && <circle cx={e.x} cy={e.y} r={1.9} fill="none" stroke="#7fe08a" strokeWidth={0.3} strokeDasharray="0.8 0.6" />}
+              <circle cx={e.x} cy={e.y} r={merged ? 1.15 : 1.0} fill={merged ? '#e8b54a' : '#1d150c'} stroke={merged ? '#8a6420' : '#caa15a'} strokeWidth={merged ? 0.25 : 0.45} />
+            </g>
+          );
+        })}
+        {/* live "release here to connect" markers while dragging a part */}
         {snapTargets.map((t, i) => (
           <circle key={`snap-${i}`} cx={t.x} cy={t.y} r={1.7} fill="none" stroke="#7fe08a" strokeWidth={0.45} strokeDasharray="1 0.7" />
         ))}
+        {/* pending wire: rubber-band from the start leg to the cursor */}
+        {wireStartPos && wireCursor && (
+          <>
+            <line x1={wireStartPos.x} y1={wireStartPos.y} x2={wireCursor.x} y2={wireCursor.y} stroke="#39e06a" strokeWidth={0.6} strokeDasharray="1.4 1" strokeLinecap="round" />
+            <circle cx={wireStartPos.x} cy={wireStartPos.y} r={1.5} fill="none" stroke="#39e06a" strokeWidth={0.5} />
+          </>
+        )}
       </svg>
 
       <div className="board-hint">
-        Drop parts from the palette, then drag a leg onto another leg — they fuse into a gold eyelet (one node). Add a{' '}
-        <b>Source</b> and a <b>Probe</b>, press <b>Play</b>, and turn a value.
+        {wireStart ? (
+          <b>Wire mode: click another eyelet to connect, or press Esc to cancel.</b>
+        ) : (
+          <>
+            Drop parts, drag a leg onto another to fuse them (gold eyelet), or <b>click two eyelets</b> to run a jumper wire between
+            distant nodes. <b>R</b> rotates the selected part. Add a <b>Source</b> + <b>Probe</b>, press <b>Play</b>, turn a value —
+            or <b>Load a circuit</b> to start from a working one.
+          </>
+        )}
         {activeFlags.map((f) => (
           <span key={f.bit} className="badge">
             ⚠ {f.text}
           </span>
         ))}
-        {dupSource && <span className="badge">⚠ multiple sources — only the first is used</span>}
+        {dupSource && <span className="badge">⚠ multiple signal sources — only the first sets ground</span>}
         {dupProbe && <span className="badge">⚠ multiple probes — only the first is scoped</span>}
       </div>
 

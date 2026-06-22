@@ -13,12 +13,13 @@ import { buildStampers, type Stamper } from './components';
 import {
   cloneNetlist,
   compileNetlist,
+  probeHasNoReturnPath,
   type CompiledNetlist,
   type ComponentParams,
   type ComponentSpec,
   type Netlist,
 } from './netlist';
-import { FLAG_FLOATING, FLAG_OK, MnaSystem } from './mnaSystem';
+import { FLAG_FLOATING, FLAG_NO_RETURN_PATH, FLAG_OK, MnaSystem } from './mnaSystem';
 import { autoFactor, Oversampler, type OsFactor } from './oversampler';
 
 export class CircuitCore {
@@ -36,6 +37,11 @@ export class CircuitCore {
 
   /** Bitwise OR of every SolveFlag seen since the last processBlock-free reset (UI teaching badges). */
   flagsAccum = FLAG_OK;
+
+  /** Topology-derived teaching flags (e.g. no-return-path). Computed once per assembleTopology and held
+   *  separately from the per-sample solver flags — solveSample resets `mna.flags` every sample, so a
+   *  purely structural cue must live outside that reset and be OR'd back in via the `flags` getter. */
+  private topoFlags = FLAG_OK;
 
   /** One solved sub-sample at the oversampled rate, advancing the source clock. Allocated ONCE (a
    *  reused closure) so the per-sample oversampler loop never allocates. */
@@ -70,6 +76,7 @@ export class CircuitCore {
     this.mna.flags = FLAG_OK;
     this.mna.setSystem(this.stampers, this.compiled.nodeCount, this.compiled.n, this.dtSub);
     if (!this.compiled.groundOk) this.mna.flags |= FLAG_FLOATING;
+    this.topoFlags = probeHasNoReturnPath(this.net) ? FLAG_NO_RETURN_PATH : FLAG_OK;
     this.time = 0;
   }
 
@@ -129,7 +136,7 @@ export class CircuitCore {
     return this.mna.lastIterations;
   }
   get flags(): number {
-    return this.mna.flags;
+    return this.mna.flags | this.topoFlags;
   }
   /** Oversampler decimation group delay (base-rate samples) — the scope delays its trace by this so
    *  what you SEE stays aligned with what you HEAR. */

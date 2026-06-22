@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { CircuitCore } from '../../src/engine/dsp/circuitCore';
-import type { ComponentKind } from '../../src/engine/dsp/netlist';
+import { compileNetlist, type ComponentKind } from '../../src/engine/dsp/netlist';
 import {
   addComponent,
+  addJumper,
   applyDropSnap,
+  componentAABB,
   computeEyelets,
   emptyBoard,
+  findFreeSlot,
   isPlayable,
   moveComponent,
   pinsOf,
+  removeComponent,
+  rotateComponent,
   toNetlist,
   type BoardState,
 } from '../../src/ui/board/boardModel';
@@ -90,6 +95,61 @@ describe('boardModel — eyelet clustering and netlist derivation', () => {
     expect(computeEyelets(b).some((e) => e.pins.length >= 2)).toBe(false);
     b = applyDropSnap(b, rid); // magnetic snap
     expect(computeEyelets(b).some((e) => e.pins.length >= 2)).toBe(true);
+  });
+
+  it('rotation moves the leads (a horizontal resistor turned 90° becomes vertical)', () => {
+    let b = addComponent(emptyBoard(), 'resistor', 20, 20);
+    const id = b.components[0]!.id;
+    const flat = pinsOf(b.components[0]!);
+    expect(Math.abs(flat[0]!.x - flat[1]!.x)).toBeGreaterThan(Math.abs(flat[0]!.y - flat[1]!.y)); // pins span x
+    b = rotateComponent(b, id);
+    expect(b.components.find((c) => c.id === id)!.rot).toBe(90);
+    const turned = pinsOf(b.components.find((c) => c.id === id)!);
+    expect(Math.abs(turned[0]!.y - turned[1]!.y)).toBeGreaterThan(Math.abs(turned[0]!.x - turned[1]!.x)); // now span y
+  });
+
+  it('a jumper wire unions two non-touching legs into one electrical net', () => {
+    let b = addComponent(emptyBoard(), 'source', 10, 10);
+    b = addComponent(b, 'resistor', 90, 70); // far from the source — no physical snap-merge
+    const sid = b.components[0]!.id;
+    const rid = b.components[1]!.id;
+    const before = compileNetlist(toNetlist(b));
+    const hotEy = toNetlist(b).components.find((c) => c.id === sid)!.pins[0]!; // source 'hot'
+    const aEy = toNetlist(b).components.find((c) => c.id === rid)!.pins[0]!; // resistor 'a'
+    expect(before.nodeOfEyelet.get(hotEy)).not.toBe(before.nodeOfEyelet.get(aEy)); // distinct nets
+
+    b = addJumper(b, { componentId: sid, pinIndex: 0 }, { componentId: rid, pinIndex: 0 });
+    const net = toNetlist(b);
+    expect(net.components.find((c) => c.kind === 'jumper')!.pins).toHaveLength(2);
+    const after = compileNetlist(net);
+    expect(after.nodeOfEyelet.get(hotEy)).toBe(after.nodeOfEyelet.get(aEy)); // jumper merged them
+  });
+
+  it('deleting a part also removes any jumper attached to it (no dangling wires)', () => {
+    let b = addComponent(emptyBoard(), 'source', 10, 10);
+    b = addComponent(b, 'resistor', 90, 70);
+    const sid = b.components[0]!.id;
+    const rid = b.components[1]!.id;
+    b = addJumper(b, { componentId: sid, pinIndex: 0 }, { componentId: rid, pinIndex: 0 });
+    expect(b.components.some((c) => c.kind === 'jumper')).toBe(true);
+    b = removeComponent(b, rid);
+    expect(b.components.some((c) => c.kind === 'jumper')).toBe(false);
+  });
+
+  it('auto-placement (findFreeSlot) never spawns overlapping bodies', () => {
+    let b = emptyBoard();
+    for (let i = 0; i < 7; i++) {
+      const slot = findFreeSlot(b, i % 2 ? 'resistor' : 'bjt');
+      b = addComponent(b, i % 2 ? 'resistor' : 'bjt', slot.x, slot.y);
+    }
+    const boxes = b.components.map(componentAABB).filter((x): x is NonNullable<typeof x> => x !== null);
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i]!;
+        const c = boxes[j]!;
+        expect(a.x < c.x + c.w && a.x + a.w > c.x && a.y < c.y + c.h && a.y + a.h > c.y).toBe(false);
+      }
+    }
   });
 
   it('assigns unique ids and round-trips params via updateParams', () => {

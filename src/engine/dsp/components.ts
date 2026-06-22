@@ -11,7 +11,7 @@
  */
 
 import { clamp, clampPotAlpha } from '../units';
-import { ARG_MAX, DEFAULT_VSAT, DIODE_MODELS, RMIN, THERMAL_VOLTAGE, TRAP_SAFE, type DiodeId } from './constants';
+import { ARG_MAX, BJT_NPN, DEFAULT_VSAT, DIODE_MODELS, RMIN, THERMAL_VOLTAGE, TRAP_SAFE, type DiodeId } from './constants';
 import { isStructural, type CompiledNetlist, type ComponentSpec, type Netlist } from './netlist';
 
 // Op-amp open-loop gain for the saturating finite-gain model (below). Large enough that closed-loop
@@ -117,10 +117,14 @@ class SourceStamper implements Stamper {
   }
   loadDynamic(ctx: StampContext): void {
     const p = this.spec.params;
-    const sine = (p.wave ?? 'sine') !== 'guitar';
-    const vs = sine ? (p.amp ?? 1) * Math.sin(this.phase) : ctx.extIn * (p.amp ?? 1);
+    const wave = p.wave ?? 'sine';
+    // 'guitar' tracks the live input; 'dc' is a constant supply rail (Vcc); else a free-running sine.
+    let vs: number;
+    if (wave === 'guitar') vs = ctx.extIn * (p.amp ?? 1);
+    else if (wave === 'dc') vs = p.amp ?? 1;
+    else vs = (p.amp ?? 1) * Math.sin(this.phase);
     ctx.addI(this.nodes[0]!, this.nodes[1]!, vs * this.g());
-    if (sine) {
+    if (wave === 'sine') {
       const twoPi = 2 * Math.PI;
       this.phase += twoPi * (p.freq ?? 1000) * ctx.dt;
       if (this.phase >= twoPi) this.phase %= twoPi;
@@ -317,6 +321,63 @@ class PotStamper implements Stamper {
   reset(): void {}
 }
 
+/**
+ * Bipolar junction transistor — Ebers-Moll (transport form), NPN. Three terminals [c, b, e]; two
+ * coupled diode junctions (base-emitter, base-collector) plus the current-gain coupling, so it is the
+ * same Newton machinery as the diode, generalized to a 3×3 companion stamp. In forward-active
+ * (Vbe ≳ 0.6 V, Vbc < 0) it gives Ic ≈ Is·e^(Vbe/Vt) and Ib ≈ Ic/βF — i.e. current gain βF — which is
+ * what makes a common-emitter stage amplify. Currents are defined flowing INTO each terminal; the
+ * emitter row is the negative sum (KCL closes inside the device). Teaching model, not SPICE-grade.
+ */
+class BjtStamper implements Stamper {
+  readonly nonlinear = true;
+  readonly reactive = false;
+  readonly auxRows = 0;
+  private readonly is = BJT_NPN.is;
+  private readonly betaF = BJT_NPN.betaF;
+  private readonly betaR = BJT_NPN.betaR;
+  private readonly vt = THERMAL_VOLTAGE;
+  constructor(readonly id: string, readonly nodes: number[]) {} // [c, b, e]
+  stampLinear(): void {}
+  stampNonlinear(ctx: StampContext): void {
+    const nc = this.nodes[0]!;
+    const nb = this.nodes[1]!;
+    const ne = this.nodes[2]!;
+    const vt = this.vt;
+    const vbe = nodeV(ctx.v, nb) - nodeV(ctx.v, ne);
+    const vbc = nodeV(ctx.v, nb) - nodeV(ctx.v, nc);
+    const f = Math.exp(clamp(vbe / vt, -ARG_MAX, ARG_MAX));
+    const r = Math.exp(clamp(vbc / vt, -ARG_MAX, ARG_MAX));
+    const gf = (this.is * f) / vt; // d(Is·e^Vbe)/dVbe
+    const gr = (this.is * r) / vt; // d(Is·e^Vbc)/dVbc
+    const grc = gr * (1 + 1 / this.betaR);
+
+    // terminal currents into the device
+    const ic = this.is * (f - r) - (this.is * (r - 1)) / this.betaR;
+    const ib = (this.is * (f - 1)) / this.betaF + (this.is * (r - 1)) / this.betaR;
+    const I = [ic, ib, -(ic + ib)];
+
+    // Jacobian g[t][j] = dI_t/dV_j, j index 0=c,1=b,2=e (via Vbe=Vb−Ve, Vbc=Vb−Vc)
+    const dIc = [grc, gf - grc, -gf];
+    const dIb = [-gr / this.betaR, gf / this.betaF + gr / this.betaR, -gf / this.betaF];
+    const g = [dIc, dIb, [-(dIc[0]! + dIb[0]!), -(dIc[1]! + dIb[1]!), -(dIc[2]! + dIb[2]!)]];
+
+    // companion stamp: A[n_t][n_j] += g[t][j]; b[n_t] += Σ_j g[t][j]·V_j0 − I_t  (ground cols drop out)
+    for (let t = 0; t < 3; t++) {
+      const nt = this.nodes[t]!;
+      if (nt < 0) continue;
+      let comp = 0;
+      for (let j = 0; j < 3; j++) {
+        ctx.addA(nt, this.nodes[j]!, g[t]![j]!);
+        comp += g[t]![j]! * nodeV(ctx.v, this.nodes[j]!);
+      }
+      ctx.addB(nt, comp - I[t]!);
+    }
+  }
+  commitSample(): void {}
+  reset(): void {}
+}
+
 /** Build the stamper objects for a compiled netlist (structural parts — jumper/probe — contribute none). */
 export function buildStampers(net: Netlist, compiled: CompiledNetlist): Stamper[] {
   const out: Stamper[] = [];
@@ -344,6 +405,9 @@ export function buildStampers(net: Netlist, compiled: CompiledNetlist): Stamper[
         break;
       case 'pot':
         out.push(new PotStamper(c.id, nodes, c));
+        break;
+      case 'bjt':
+        out.push(new BjtStamper(c.id, nodes));
         break;
       default:
         throw new Error(`components: unsupported kind '${c.kind}'`);

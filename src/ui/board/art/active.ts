@@ -154,6 +154,46 @@ export const sourceArt: ArtRenderer = (params: ComponentParams): ComponentArt =>
 };
 
 /**
+ * BJT in a TO-92 package: a small D-shaped epoxy body (flat front face) with three leads exiting the
+ * bottom. Leads are exposed in netlist pin order — collector, base, emitter ('c','b','e') — left to
+ * right, each labelled so you can tell them apart. The flat face is the orientation cue (as on a real
+ * TO-92). ~5 mm body; leads drop ~3 mm.
+ */
+export const bjtArt: ArtRenderer = (_params: ComponentParams): ComponentArt => {
+  const bodyW = 6.4;
+  const bodyH = 5.0;
+  const leadDrop = 3.0;
+  const width = bodyW;
+  const height = bodyH + leadDrop;
+  const cx = width / 2;
+  const yLead = bodyH;
+  const yTip = height;
+  const dx = 2.0; // lead pitch
+  const xs = [cx - dx, cx, cx + dx];
+  const pins: ArtPin[] = [
+    { name: 'c', x: xs[0]!, y: yTip },
+    { name: 'b', x: xs[1]!, y: yTip },
+    { name: 'e', x: xs[2]!, y: yTip },
+  ];
+  const labels = ['C', 'B', 'E'];
+  const svg =
+    `<g class="bb-bjt">` +
+    // D-shaped body: rounded back, flatter front — a TO-92 silhouette
+    `<path d="M${f(0.4)} ${f(0.8)} Q ${f(0.4)} 0 ${f(1.2)} 0 L ${f(bodyW - 1.2)} 0 Q ${f(bodyW)} 0 ${f(bodyW)} ${f(1.6)} ` +
+    `L ${f(bodyW)} ${f(bodyH - 1.6)} Q ${f(bodyW)} ${f(bodyH)} ${f(bodyW - 1.2)} ${f(bodyH)} L ${f(1.2)} ${f(bodyH)} ` +
+    `Q ${f(0.4)} ${f(bodyH)} ${f(0.4)} ${f(bodyH - 0.8)} Z" fill="#1b1b20" stroke="#000" stroke-width="0.2"/>` +
+    // flat-face hint + subtle top highlight
+    `<line x1="${f(0.4)}" y1="${f(1.0)}" x2="${f(0.4)}" y2="${f(bodyH - 1.0)}" stroke="#3a3a44" stroke-width="0.3"/>` +
+    `<ellipse cx="${f(bodyW * 0.5)}" cy="${f(1.3)}" rx="${f(bodyW * 0.32)}" ry="0.5" fill="#34343c" opacity="0.6"/>` +
+    // three leads
+    xs.map((x) => `<line x1="${f(x)}" y1="${f(yLead)}" x2="${f(x)}" y2="${f(yTip)}" stroke="#b9b9c2" stroke-width="0.5"/>`).join('') +
+    // C / B / E labels above each lead
+    xs.map((x, i) => `<text x="${f(x)}" y="${f(bodyH - 1.0)}" font-size="1.5" fill="#cfcfd6" text-anchor="middle">${labels[i]}</text>`).join('') +
+    `</g>`;
+  return { svg, width, height, pins };
+};
+
+/**
  * Scope probe / test point: a small spring-clip test point with a single 'tip' terminal. Marks the node
  * the scope (and audio output) reads. Tiny footprint — it's a probe touchdown, not a packaged part.
  */

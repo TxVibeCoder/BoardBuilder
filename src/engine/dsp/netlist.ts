@@ -17,6 +17,7 @@ export type ComponentKind =
   | 'diode'
   | 'opamp'
   | 'pot'
+  | 'bjt'
   | 'source'
   | 'probe'
   | 'jumper';
@@ -31,17 +32,18 @@ export interface ComponentParams {
   alpha?: number; // pot wiper position 0..1
   potR?: number; // pot total Ω
   freq?: number; // source sine frequency (Hz)
-  amp?: number; // source amplitude (V)
+  amp?: number; // source amplitude (V); for wave 'dc' this is the constant rail voltage
   rsrc?: number; // source series impedance (Ω); small ≈ ideal
   ideal?: boolean; // source: ideal voltage (aux row) instead of Norton
-  wave?: 'sine' | 'guitar'; // source waveform; 'guitar' reads the external input sample
+  wave?: 'sine' | 'guitar' | 'dc'; // source waveform; 'guitar' reads the external input sample; 'dc' = a constant supply rail (Vcc)
+  bjt?: 'NPN'; // transistor polarity (NPN only for now)
   polarity?: boolean; // electrolytic cap orientation (display/warning only)
 }
 
 export interface ComponentSpec {
   id: string;
   kind: ComponentKind;
-  /** Eyelet ids. R/C/L/D: [a,b]; opamp: [plus,minus,out]; pot: [a,wiper,b]; source: [hot,gnd]; probe/jumper: 2. */
+  /** Eyelet ids. R/C/L/D: [a,b]; opamp: [plus,minus,out]; pot: [a,wiper,b]; bjt: [c,b,e]; source: [hot,gnd]; probe/jumper: 2. */
   pins: string[];
   params: ComponentParams;
 }
@@ -186,4 +188,67 @@ export function compileNetlist(net: Netlist): CompiledNetlist {
   }
 
   return { groundOk, nodeCount, auxCount, n: nodeCount + auxCount, pinNodes, auxBase, nodeOfEyelet, probeIndex };
+}
+
+/**
+ * Teaching check (NOT a solver fault): is the probe pinned to the source through a series part that
+ * carries no current? A resistor (or cap, inductor, diode…) sitting in a line between the source and
+ * the probe only changes the signal if current flows through it — and current flows only if the probe
+ * node has a path to ground OTHER than back through the source (i.e. a divider / return path). With no
+ * such path, the series part drops nothing and turning its value does nothing — the #1 dead beginner
+ * build `source → resistor → probe`. This detects exactly that so the UI can teach "add a resistor to
+ * ground to make a divider".
+ *
+ * Returns false (no badge) when: a divider/return path exists; an op-amp is present (its output is a
+ * driven reference — out of scope, and the no-feedback fault covers its degenerate case); there is no
+ * source+probe to reason about; the probe sits on ground; or the probe reads the source directly with
+ * nothing in series (probe ≡ source node — you simply haven't added a part yet).
+ */
+export function probeHasNoReturnPath(net: Netlist): boolean {
+  if (net.components.some((c) => c.kind === 'opamp')) return false;
+  const src = net.components.find((c) => c.kind === 'source' && c.pins.length >= 2);
+  if (!src) return false;
+
+  // resolve nets exactly as compileNetlist does (jumpers merge two eyelets into one net)
+  const uf = new UnionFind();
+  for (const c of net.components) for (const p of c.pins) uf.add(p);
+  for (const c of net.components) if (c.kind === 'jumper' && c.pins.length >= 2) uf.union(c.pins[0]!, c.pins[1]!);
+
+  const groundRoot = net.groundEyelet !== undefined ? uf.find(net.groundEyelet) : uf.find(src.pins[1]!);
+  const hotRoot = uf.find(src.pins[0]!);
+
+  let probeRoot: string | null = null;
+  if (net.probeEyelet !== undefined) probeRoot = uf.find(net.probeEyelet);
+  else {
+    const probe = net.components.find((c) => c.kind === 'probe' && c.pins.length >= 1);
+    if (probe) probeRoot = uf.find(probe.pins[0]!);
+  }
+  if (probeRoot === null || probeRoot === groundRoot || probeRoot === hotRoot) return false;
+
+  // Conductive graph over nets, EXCLUDING the source (we want a path to ground that is NOT through the
+  // source) and the probe (it draws no current). Caps/inductors/diodes/pot-legs all conduct the signal,
+  // so they count as edges — a series cap with no return path is just as "dead" as a series resistor.
+  const g = new UnionFind();
+  const edge = (a: string, b: string): void => g.union(uf.find(a), uf.find(b));
+  for (const c of net.components) {
+    switch (c.kind) {
+      case 'resistor':
+      case 'capacitor':
+      case 'inductor':
+      case 'diode':
+        if (c.pins.length >= 2) edge(c.pins[0]!, c.pins[1]!);
+        break;
+      case 'pot':
+      case 'bjt':
+        if (c.pins.length >= 3) {
+          edge(c.pins[0]!, c.pins[1]!);
+          edge(c.pins[1]!, c.pins[2]!);
+        }
+        break;
+      // source, probe, jumper (already merged above), opamp (excluded above): contribute no edge
+    }
+  }
+  const probeReadsSource = g.find(probeRoot) === g.find(hotRoot); // a series part links probe ← source
+  const probeReachesGround = g.find(probeRoot) === g.find(groundRoot); // a divider / return path exists
+  return probeReadsSource && !probeReachesGround;
 }
