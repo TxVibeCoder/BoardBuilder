@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+test-results/
+tsconfig.tsbuildinfo
+.claude/
+
+# Local-only design notes / scratch — only README + CLAUDE + DECISIONS live in the repo.
+docs/
+exports/
+scripts/
