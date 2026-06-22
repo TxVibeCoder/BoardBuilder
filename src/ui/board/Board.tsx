@@ -12,12 +12,15 @@ import type { ComponentArt } from './artTypes';
 import { artFor } from './componentArt';
 import {
   addComponent,
+  applyDropSnap,
   clusterSignature,
   computeEyelets,
   emptyBoard,
   isPlayable,
   moveComponent,
+  pinsOf,
   removeComponent,
+  SNAP_MM,
   toNetlist,
   updateParams,
   type BoardComponent,
@@ -157,13 +160,21 @@ export function Board() {
     } catch {
       /* capture already released */
     }
-    if (d.moved) relatch(); // re-wire only after the drag settles (the allowed relatch gap)
+    if (d.moved) {
+      const snapped = applyDropSnap(boardRef.current, d.id); // click a near leg onto its target
+      boardRef.current = snapped;
+      setBoard(snapped);
+      relatch(); // re-wire only after the drag settles (the allowed relatch gap)
+    }
   };
 
   const addPart = (kind: ComponentKind) => {
     const b = boardRef.current;
-    const spawnX = 14 + (b.nextId % 5) * 6;
-    const next = addComponent(b, kind, spawnX, 14);
+    // spread new parts across the board (4 columns) so they land clearly separated, never overlapping
+    const i = b.components.length;
+    const spawnX = 18 + (i % 4) * 34;
+    const spawnY = 16 + Math.floor(i / 4) * 22;
+    const next = addComponent(b, kind, spawnX, spawnY);
     setBoard(next);
     setSelected(next.components[next.components.length - 1]!.id);
     boardRef.current = next;
@@ -305,6 +316,23 @@ export function Board() {
   const dupSource = board.components.filter((c) => c.kind === 'source').length > 1;
   const dupProbe = board.components.filter((c) => c.kind === 'probe').length > 1;
 
+  // while dragging, mark the legs the moving part will snap onto if released now (catch-range feedback)
+  const dragId = dragRef.current?.id;
+  const snapTargets: { x: number; y: number }[] = [];
+  if (dragId) {
+    const dragged = board.components.find((c) => c.id === dragId);
+    if (dragged) {
+      const dp = pinsOf(dragged);
+      const r2 = SNAP_MM * SNAP_MM;
+      for (const c of board.components) {
+        if (c.id === dragId) continue;
+        for (const op of pinsOf(c)) {
+          if (dp.some((p) => (p.x - op.x) ** 2 + (p.y - op.y) ** 2 <= r2)) snapTargets.push({ x: op.x, y: op.y });
+        }
+      }
+    }
+  }
+
   return (
     <div className="wrap board-wrap">
       <div className="board-bar">
@@ -358,6 +386,10 @@ export function Board() {
             <circle key={e.id} cx={e.x} cy={e.y} r={1.0} fill="#1d150c" stroke="#caa15a" strokeWidth={0.45} />
           ),
         )}
+        {/* live "release here to connect" markers while dragging */}
+        {snapTargets.map((t, i) => (
+          <circle key={`snap-${i}`} cx={t.x} cy={t.y} r={1.7} fill="none" stroke="#7fe08a" strokeWidth={0.45} strokeDasharray="1 0.7" />
+        ))}
       </svg>
 
       <div className="board-hint">

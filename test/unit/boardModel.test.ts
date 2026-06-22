@@ -3,6 +3,7 @@ import { CircuitCore } from '../../src/engine/dsp/circuitCore';
 import type { ComponentKind } from '../../src/engine/dsp/netlist';
 import {
   addComponent,
+  applyDropSnap,
   computeEyelets,
   emptyBoard,
   isPlayable,
@@ -71,6 +72,24 @@ describe('boardModel — eyelet clustering and netlist derivation', () => {
     const out = new Float64Array(64);
     core.processBlock(new Float64Array(64).fill(1), out, 64);
     expect(Number.isFinite(out[63]!)).toBe(true);
+  });
+
+  it("a part's own legs never merge into one node (no self-short on close-spaced pins)", () => {
+    // source hot/gnd are ~3.6 mm apart; op-amp ±in ~2.5 mm — a generous merge radius would short them
+    expect(computeEyelets(addComponent(emptyBoard(), 'source', 50, 50)).length).toBe(2);
+    expect(computeEyelets(addComponent(emptyBoard(), 'opamp', 50, 50)).length).toBe(3);
+  });
+
+  it('snap-on-drop pulls a near leg exactly onto its target, then they merge', () => {
+    let b = emptyBoard();
+    let r = placePinAt(b, 'source', 'hot', 50, 50);
+    b = r.board;
+    r = placePinAt(b, 'resistor', 'a', 53, 50); // 3 mm away: within catch range, but NOT merged yet
+    b = r.board;
+    const rid = r.id;
+    expect(computeEyelets(b).some((e) => e.pins.length >= 2)).toBe(false);
+    b = applyDropSnap(b, rid); // magnetic snap
+    expect(computeEyelets(b).some((e) => e.pins.length >= 2)).toBe(true);
   });
 
   it('assigns unique ids and round-trips params via updateParams', () => {

@@ -12,8 +12,14 @@
 import type { ComponentKind, ComponentParams, ComponentSpec, Netlist } from '../../engine/dsp/netlist';
 import { COMPONENT_ART } from './componentArt';
 
-/** Pins within this distance (mm) merge into one eyelet. */
-export const SNAP_MM = 3;
+/** Magnetic CATCH range (mm): dropping a leg within this of another snaps it exactly onto it. Generous
+ *  so hand-dragging legs together is forgiving — "drag a leg near another → they click together". */
+export const SNAP_MM = 5;
+
+/** MERGE tolerance (mm): two pins become one eyelet (node) only when essentially coincident. Kept tiny
+ *  (well below any part's own inter-leg spacing) so connections happen ONLY via the exact snap-on-drop —
+ *  a generous merge radius would short a part's own closely-spaced legs (source hot/gnd, op-amp ±in). */
+export const MERGE_MM = 0.6;
 
 export interface BoardComponent {
   id: string;
@@ -130,9 +136,10 @@ export function computeEyelets(board: BoardState): BoardEyelet[] {
     }
     return r;
   };
-  const r2 = SNAP_MM * SNAP_MM;
+  const r2 = MERGE_MM * MERGE_MM;
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
+      if (pins[i]!.componentId === pins[j]!.componentId) continue; // a part's own legs are never one node
       const dx = pins[i]!.x - pins[j]!.x;
       const dy = pins[i]!.y - pins[j]!.y;
       if (dx * dx + dy * dy <= r2) {
@@ -202,6 +209,38 @@ export function toNetlist(board: BoardState): Netlist {
  *  fails legibly if the wiring is incomplete). */
 export function isPlayable(board: BoardState): boolean {
   return board.components.some((c) => c.kind === 'source') && board.components.some((c) => c.kind === 'probe');
+}
+
+/**
+ * Magnetic snap-on-drop: nudge the just-dropped component so its closest in-range pin lands EXACTLY on
+ * the nearest other component's pin. Turns "roughly drag a leg near another" into a clean, unambiguous
+ * solder junction (the rest of the part follows rigidly). Returns the board unchanged if nothing is in
+ * range. The dragged component aligns to the STATIONARY ones, never the reverse.
+ */
+export function applyDropSnap(board: BoardState, id: string): BoardState {
+  const dragged = board.components.find((c) => c.id === id);
+  if (!dragged) return board;
+  const dpins = pinsOf(dragged);
+  if (dpins.length === 0) return board;
+  const others = board.components.filter((c) => c.id !== id).flatMap(pinsOf);
+  let bestDx = 0;
+  let bestDy = 0;
+  let bestD2 = SNAP_MM * SNAP_MM;
+  let found = false;
+  for (const dp of dpins) {
+    for (const op of others) {
+      const dx = op.x - dp.x;
+      const dy = op.y - dp.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestD2) {
+        bestD2 = d2;
+        bestDx = dx;
+        bestDy = dy;
+        found = true;
+      }
+    }
+  }
+  return found ? moveComponent(board, id, dragged.x + bestDx, dragged.y + bestDy) : board;
 }
 
 /** A stable fingerprint of the eyelet clustering (which pins share which node). Two boards with the
