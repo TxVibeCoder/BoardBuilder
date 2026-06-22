@@ -203,3 +203,13 @@ export function toNetlist(board: BoardState): Netlist {
 export function isPlayable(board: BoardState): boolean {
   return board.components.some((c) => c.kind === 'source') && board.components.some((c) => c.kind === 'probe');
 }
+
+/** A stable fingerprint of the eyelet clustering (which pins share which node). Two boards with the
+ *  same signature have the same electrical topology — used to decide whether a value edit that nudged
+ *  a pin (e.g. diode Si↔LED changes the body width) actually re-wired anything and needs a relatch. */
+export function clusterSignature(board: BoardState): string {
+  return computeEyelets(board)
+    .map((e) => e.pins.map(pinKey).sort().join(','))
+    .sort()
+    .join('|');
+}

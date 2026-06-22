@@ -12,6 +12,7 @@ import type { ComponentArt } from './artTypes';
 import { artFor } from './componentArt';
 import {
   addComponent,
+  clusterSignature,
   computeEyelets,
   emptyBoard,
   isPlayable,
@@ -97,6 +98,7 @@ export function Board() {
   const dragRef = useRef<{ id: string; dx: number; dy: number; moved: boolean } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
+  const startingRef = useRef(false); // re-entrancy guard for the async start()
   const nodeRef = useRef<AudioWorkletNode | null>(null);
   const inAnalyserRef = useRef<AnalyserNode | null>(null);
   const outAnalyserRef = useRef<AnalyserNode | null>(null);
@@ -104,10 +106,19 @@ export function Board() {
 
   const eyelets = useMemo(() => computeEyelets(board), [board]);
 
-  /** Push the current board's netlist to the worklet (a topology relatch). */
+  /** Push the current board to the worklet — authoritative in BOTH directions: load the derived netlist
+   *  when playable, otherwise unload so a now-incomplete board (e.g. its source/probe was deleted) goes
+   *  silent and its teaching badges clear, instead of phantom-playing the last circuit. */
   const relatch = useCallback(() => {
+    const node = nodeRef.current;
+    if (!node) return;
     const b = boardRef.current;
-    if (nodeRef.current && isPlayable(b)) nodeRef.current.port.postMessage({ type: 'load', netlist: toNetlist(b) });
+    if (isPlayable(b)) {
+      node.port.postMessage({ type: 'load', netlist: toNetlist(b) });
+    } else {
+      node.port.postMessage({ type: 'unload' });
+      setFlags(0);
+    }
   }, []);
 
   const clientToBoard = (e: React.PointerEvent): { x: number; y: number } => {
@@ -135,11 +146,17 @@ export function Board() {
     setBoard((b) => moveComponent(b, d.id, p.x - d.dx, p.y - d.dy));
   };
 
-  const onUp = (e: React.PointerEvent) => {
+  // Ends a drag from pointerup OR a cancelled/lost-capture gesture (touch interruption, mid-drag
+  // unmount) so the part never sticks to the cursor and a moved-then-cancelled drag still relatches.
+  const endDrag = (e: React.PointerEvent) => {
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
-    svgRef.current?.releasePointerCapture(e.pointerId);
+    try {
+      svgRef.current?.releasePointerCapture(e.pointerId);
+    } catch {
+      /* capture already released */
+    }
     if (d.moved) relatch(); // re-wire only after the drag settles (the allowed relatch gap)
   };
 
@@ -162,9 +179,15 @@ export function Board() {
   };
 
   const onParam = (id: string, params: Partial<ComponentParams>) => {
-    setBoard((b) => updateParams(b, id, params));
-    boardRef.current = updateParams(boardRef.current, id, params);
-    if (nodeRef.current) nodeRef.current.port.postMessage({ type: 'set', id, params }); // glitch-free value change
+    const before = boardRef.current;
+    const after = updateParams(before, id, params);
+    setBoard(after);
+    boardRef.current = after;
+    if (!nodeRef.current) return;
+    // A value can nudge a pin (e.g. diode Si↔LED changes the body width) and so make/break a snap-merge.
+    // If the wiring actually changed, relatch (rebuild topology); otherwise it's a glitch-free value tweak.
+    if (clusterSignature(before) !== clusterSignature(after)) relatch();
+    else nodeRef.current.port.postMessage({ type: 'set', id, params });
   };
 
   // ---- scope -----------------------------------------------------------------------------------
@@ -185,7 +208,7 @@ export function Board() {
         break;
       }
     }
-    const span = Math.min(Math.floor((3 * 48000) / SRC_HZ), size - start - 1);
+    const span = Math.max(2, Math.min(Math.floor((3 * 48000) / SRC_HZ), size - start - 1)); // ≥2 ⇒ no /0
     let peak = 0.05;
     for (let i = 0; i < size; i++) {
       const a = Math.abs(outBuf[i]!);
@@ -228,50 +251,59 @@ export function Board() {
     inAnalyserRef.current = null;
     outAnalyserRef.current = null;
     setPlaying(false);
+    setFlags(0); // audio stopped → no live badges
   }, []);
 
   const start = useCallback(async () => {
-    const ctx = new AudioContext({ latencyHint: 'interactive' });
-    await ctx.audioWorklet.addModule(circuitWorkletUrl);
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.value = SRC_HZ;
-    const inGain = ctx.createGain();
-    inGain.gain.value = 1;
-    const node = new AudioWorkletNode(ctx, 'boardbuilder-circuit', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
-    node.port.onmessage = (e: MessageEvent) => {
-      const m = e.data as { type?: string; flags?: number };
-      if (m.type === 'flags' && typeof m.flags === 'number') setFlags(m.flags);
-    };
-    const inAnalyser = ctx.createAnalyser();
-    inAnalyser.fftSize = 4096;
-    const outAnalyser = ctx.createAnalyser();
-    outAnalyser.fftSize = 4096;
-    const makeup = ctx.createGain();
-    makeup.gain.value = 0.35;
-    const limiter = ctx.createWaveShaper();
-    limiter.curve = makeLimiterCurve() as Float32Array<ArrayBuffer>;
-    limiter.oversample = '2x';
-    osc.connect(inGain);
-    inGain.connect(inAnalyser);
-    inGain.connect(node);
-    node.connect(outAnalyser);
-    node.connect(makeup);
-    makeup.connect(limiter).connect(ctx.destination);
-    osc.start();
-    ctxRef.current = ctx;
-    nodeRef.current = node;
-    inAnalyserRef.current = inAnalyser;
-    outAnalyserRef.current = outAnalyser;
-    setPlaying(true);
-    if (isPlayable(boardRef.current)) node.port.postMessage({ type: 'load', netlist: toNetlist(boardRef.current) });
-    rafRef.current = requestAnimationFrame(draw);
+    if (ctxRef.current || startingRef.current) return; // ignore extra Play clicks during the async setup
+    startingRef.current = true;
+    try {
+      const ctx = new AudioContext({ latencyHint: 'interactive' });
+      await ctx.audioWorklet.addModule(circuitWorkletUrl);
+      const osc = ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = SRC_HZ;
+      const inGain = ctx.createGain();
+      inGain.gain.value = 1;
+      const node = new AudioWorkletNode(ctx, 'boardbuilder-circuit', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+      node.port.onmessage = (e: MessageEvent) => {
+        const m = e.data as { type?: string; flags?: number };
+        if (m.type === 'flags' && typeof m.flags === 'number') setFlags(m.flags);
+      };
+      const inAnalyser = ctx.createAnalyser();
+      inAnalyser.fftSize = 4096;
+      const outAnalyser = ctx.createAnalyser();
+      outAnalyser.fftSize = 4096;
+      const makeup = ctx.createGain();
+      makeup.gain.value = 0.35;
+      const limiter = ctx.createWaveShaper();
+      limiter.curve = makeLimiterCurve() as Float32Array<ArrayBuffer>;
+      limiter.oversample = '2x';
+      osc.connect(inGain);
+      inGain.connect(inAnalyser);
+      inGain.connect(node);
+      node.connect(outAnalyser);
+      node.connect(makeup);
+      makeup.connect(limiter).connect(ctx.destination);
+      osc.start();
+      ctxRef.current = ctx;
+      nodeRef.current = node;
+      inAnalyserRef.current = inAnalyser;
+      outAnalyserRef.current = outAnalyser;
+      setPlaying(true);
+      if (isPlayable(boardRef.current)) node.port.postMessage({ type: 'load', netlist: toNetlist(boardRef.current) });
+      rafRef.current = requestAnimationFrame(draw);
+    } finally {
+      startingRef.current = false;
+    }
   }, [draw]);
 
   useEffect(() => () => void ctxRef.current?.close(), []);
 
   const sel = board.components.find((c) => c.id === selected) ?? null;
   const activeFlags = FLAG_BADGES.filter((f) => (flags & f.bit) !== 0);
+  const dupSource = board.components.filter((c) => c.kind === 'source').length > 1;
+  const dupProbe = board.components.filter((c) => c.kind === 'probe').length > 1;
 
   return (
     <div className="wrap board-wrap">
@@ -296,7 +328,9 @@ export function Board() {
         viewBox={`0 0 ${BOARD_W} ${BOARD_H}`}
         style={{ aspectRatio: `${BOARD_W} / ${BOARD_H}` }}
         onPointerMove={onMove}
-        onPointerUp={onUp}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
         onPointerDown={() => setSelected(null)}
       >
         <rect x={0} y={0} width={BOARD_W} height={BOARD_H} fill="#c8a86a" rx={2} />
@@ -334,6 +368,8 @@ export function Board() {
             ⚠ {f.text}
           </span>
         ))}
+        {dupSource && <span className="badge">⚠ multiple sources — only the first is used</span>}
+        {dupProbe && <span className="badge">⚠ multiple probes — only the first is scoped</span>}
       </div>
 
       <canvas ref={canvasRef} className="scope board-scope" width={SCOPE_W} height={SCOPE_H} />

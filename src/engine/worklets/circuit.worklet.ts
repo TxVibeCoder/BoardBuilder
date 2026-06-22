@@ -17,6 +17,7 @@ const QUANTUM = 128;
 
 type InMsg =
   | { type: 'load'; netlist: Netlist }
+  | { type: 'unload' }
   | { type: 'set'; id: string; params: Partial<ComponentParams> };
 
 class CircuitProcessor extends AudioWorkletProcessor {
@@ -37,6 +38,9 @@ class CircuitProcessor extends AudioWorkletProcessor {
         } catch {
           this.core = null;
         }
+        this.lastFlags = -1;
+      } else if (msg.type === 'unload') {
+        this.core = null; // board no longer playable (e.g. source/probe removed) → go silent
         this.lastFlags = -1;
       } else if (msg.type === 'set' && this.core) {
         this.core.setValue(msg.id, msg.params);
