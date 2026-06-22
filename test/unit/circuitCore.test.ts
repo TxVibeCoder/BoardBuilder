@@ -68,7 +68,8 @@ describe('CircuitCore — generalized MNA engine, §9 starter circuits', () => {
 
   it('§9.4 diode clipper SUBSUMES diodeClipperCore numerically (symmetric & asymmetric)', () => {
     for (const symmetric of [true, false]) {
-      const core = new CircuitCore(net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), D('D', 'n2', 'gnd', symmetric), probe('n2')]));
+      // force OS=1 so this is an apples-to-apples sample-by-sample comparison with the 1× reference
+      const core = new CircuitCore(net([guitarSrc('S', 'n1', 'gnd'), R('R', 'n1', 'n2', 4700), D('D', 'n2', 'gnd', symmetric), probe('n2')]), 48000, { oversample: 1 });
       const ref = new DiodeClipperCore({ seriesR: 4700, diode: 'Si', symmetric });
       const N = 2400;
       const inb = new Float64Array(N);

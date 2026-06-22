@@ -53,9 +53,19 @@ Named **BoardBuilder** (decided 2026-06-22).
   (`engine/dsp/`: `constants`, `linearSolver` (DenseLU seam), `netlist` (union-find), `components`
   (stamp API + R/C/L/diode/op-amp/pot/source), `mnaSystem`, `circuitCore`). Solves all six §9 starter
   circuits with analytic tests (divider, RC cutoffs, diode clip, op-amp gain/saturation/soft-clip),
-  **subsumes Phase 0 numerically**, and fails legibly (floating node, no-ground, pot end-stops). 26
-  tests pass. The engine decisions + the full spec are in `DECISIONS.md` / `docs/ENGINE_DESIGN.md`.
+  **subsumes Phase 0 numerically**, and fails legibly (floating node, no-ground, pot end-stops).
+  The engine decisions + the full spec are in `DECISIONS.md` / `docs/ENGINE_DESIGN.md`.
+- **Phase 1 live audio — done.** Oversampler (`engine/dsp/oversampler.ts`, half-band polyphase, auto
+  1×/4×/8× latched at topology, group-delay export) wired into `circuitCore`'s per-sample solve;
+  `engine/worklets/circuit.worklet.ts` runs `CircuitCore` in an AudioWorklet (load-netlist / set-knob
+  messages); `data/starterCircuits.ts` = the six §9 circuits as loadable netlists with live knobs; and
+  `ui/CircuitDemo.tsx` is the live demo (pick a circuit → Play → scope shows input vs probe → turn a
+  knob and it changes in lock-step — verified in-browser). **68 tests pass; typecheck + build green.**
+- **Board assets — built ahead.** `ui/board/artTypes.ts` + `ui/board/art/{passives,active}.ts` —
+  parametric, value-driven SVG renderers (resistor color bands from R, electrolytic, diode, op-amp
+  DIP-8, pot, source, probe) with lead-anchor pins in netlist order, for the eyelet board.
 
-**Next (Phase 1 remainder):** oversampler (auto 1×/4×/8×, group-delay-aligned scope), the
-`circuit.worklet.ts` thin shell + live audio wiring, then the eyelet-board UI (drop → eyelets → drag →
-snap-merge → split, parametric SVG, scope probe) and the loadable starter circuits.
+**Next:** the interactive **eyelet board** — drop a component → eyelets appear at its pins → drag →
+snap-merge legs into one node → split; derive the netlist from the board geometry; jumper wires
+(reuse SynthStack `CableLayer`); a probe you clip onto an eyelet. Then Phase 2 instrumentation
+(frequency-response + DC-bias views, save/load).

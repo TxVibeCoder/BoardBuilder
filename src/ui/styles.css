@@ -142,3 +142,37 @@ header .sub {
 .teaches b {
   color: var(--ink);
 }
+
+.picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.picker button {
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid #3a2c1c;
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.picker button.on {
+  background: var(--brass);
+  color: #1a1208;
+  font-weight: 600;
+  border-color: var(--brass);
+}
+
+.badge {
+  color: #1a1208;
+  background: var(--accent);
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-weight: 600;
+  font-size: 12px;
+}
