@@ -42,10 +42,12 @@ import { Schematic } from '../Schematic';
 import type { ComponentKind, ComponentParams } from '../../engine/dsp/netlist';
 import type { DiodeId } from '../../engine/dsp/constants';
 import { FLAG_FLOATING, FLAG_NO_RETURN_PATH, FLAG_NONFINITE, FLAG_OPAMP_NO_FEEDBACK } from '../../engine/dsp/mnaSystem';
-import { formatOhms } from '../../engine/units';
+import { clamp, formatOhms } from '../../engine/units';
 
 const BOARD_W = BOARD_W_MM; // mm
 const BOARD_H = BOARD_H_MM;
+const ASPECT = BOARD_H / BOARD_W; // viewBox must keep the board's aspect (the <svg> aspect is fixed)
+const MIN_VB_W = BOARD_W * 0.18; // tightest zoom ≈ 5.5× (smaller viewBox ⇒ bigger parts)
 const SRC_HZ = 110;
 const SCOPE_W = 1600;
 const SCOPE_H = 320;
@@ -153,12 +155,17 @@ export function Board() {
   const [view, setView] = useState<'board' | 'schematic' | 'response'>('board');
   const [showBias, setShowBias] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // pan/zoom: the board's SVG viewBox in mm. Smaller w/h ⇒ zoomed in; x/y pan within the board.
+  const [vb, setVb] = useState({ x: 0, y: 0, w: BOARD_W, h: BOARD_H });
 
   const boardRef = useRef(board);
   boardRef.current = board;
 
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<{ id: string; dx: number; dy: number; moved: boolean } | null>(null);
+  const vbRef = useRef(vb);
+  vbRef.current = vb;
+  const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number; moved: boolean } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<AudioContext | null>(null);
   const startingRef = useRef(false); // re-entrancy guard for the async start()
@@ -186,12 +193,34 @@ export function Board() {
     }
   }, []);
 
+  // screen → board mm, through the CURRENT viewBox (so drag/wire stay accurate when zoomed/panned)
   const clientToBoard = (e: React.PointerEvent): { x: number; y: number } => {
     const svg = svgRef.current;
     if (!svg) return { x: 0, y: 0 };
     const rect = svg.getBoundingClientRect();
-    return { x: ((e.clientX - rect.left) / rect.width) * BOARD_W, y: ((e.clientY - rect.top) / rect.height) * BOARD_H };
+    const v = vbRef.current;
+    return { x: v.x + ((e.clientX - rect.left) / rect.width) * v.w, y: v.y + ((e.clientY - rect.top) / rect.height) * v.h };
   };
+
+  // ---- pan / zoom -------------------------------------------------------------------------------
+  const clampVb = (x: number, y: number, w: number, h: number): { x: number; y: number; w: number; h: number } => ({
+    x: clamp(x, 0, Math.max(0, BOARD_W - w)),
+    y: clamp(y, 0, Math.max(0, BOARD_H - h)),
+    w,
+    h,
+  });
+  /** Zoom by `factor` (<1 = in) keeping the board point (cx,cy) fixed under the cursor. */
+  const zoomBy = (factor: number, cx: number, cy: number): void =>
+    setVb((v) => {
+      const w = clamp(v.w * factor, MIN_VB_W, BOARD_W);
+      const h = w * ASPECT;
+      return clampVb(cx - ((cx - v.x) / v.w) * w, cy - ((cy - v.y) / v.h) * h, w, h);
+    });
+  const zoomCenter = (factor: number): void => {
+    const v = vbRef.current;
+    zoomBy(factor, v.x + v.w / 2, v.y + v.h / 2);
+  };
+  const resetZoom = (): void => setVb({ x: 0, y: 0, w: BOARD_W, h: BOARD_H });
 
   const startDrag = (e: React.PointerEvent, id: string) => {
     e.stopPropagation();
@@ -203,7 +232,33 @@ export function Board() {
     svgRef.current?.setPointerCapture(e.pointerId);
   };
 
+  // Begin a pan when pressing empty board (a click there still deselects / cancels a pending wire).
+  const onBackgroundDown = (e: React.PointerEvent) => {
+    if (wireStart) {
+      setWireStart(null);
+      setWireCursor(null);
+      setSelected(null);
+      return;
+    }
+    const v = vbRef.current;
+    panRef.current = { sx: e.clientX, sy: e.clientY, ox: v.x, oy: v.y, moved: false };
+    svgRef.current?.setPointerCapture(e.pointerId);
+  };
+
   const onMove = (e: React.PointerEvent) => {
+    const pan = panRef.current;
+    if (pan) {
+      const svg = svgRef.current;
+      if (svg) {
+        const rect = svg.getBoundingClientRect();
+        const v = vbRef.current;
+        if (Math.abs(e.clientX - pan.sx) + Math.abs(e.clientY - pan.sy) > 3) pan.moved = true;
+        const dx = ((e.clientX - pan.sx) / rect.width) * v.w;
+        const dy = ((e.clientY - pan.sy) / rect.height) * v.h;
+        setVb(clampVb(pan.ox - dx, pan.oy - dy, v.w, v.h));
+      }
+      return;
+    }
     if (wireStart) setWireCursor(clientToBoard(e)); // rubber-band the pending wire toward the cursor
     const d = dragRef.current;
     if (!d) return;
@@ -215,6 +270,17 @@ export function Board() {
   // Ends a drag from pointerup OR a cancelled/lost-capture gesture (touch interruption, mid-drag
   // unmount) so the part never sticks to the cursor and a moved-then-cancelled drag still relatches.
   const endDrag = (e: React.PointerEvent) => {
+    const pan = panRef.current;
+    if (pan) {
+      panRef.current = null;
+      try {
+        svgRef.current?.releasePointerCapture(e.pointerId);
+      } catch {
+        /* capture already released */
+      }
+      if (!pan.moved) setSelected(null); // a click on empty board (no drag) deselects
+      return;
+    }
     const d = dragRef.current;
     if (!d) return;
     dragRef.current = null;
@@ -435,6 +501,24 @@ export function Board() {
 
   useEffect(() => () => void ctxRef.current?.close(), []);
 
+  // wheel zoom, centred on the cursor. A native non-passive listener so preventDefault() actually stops
+  // the page from scrolling; re-attached when the board <svg> remounts (e.g. after a view switch).
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg || view !== 'board') return;
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault();
+      const rect = svg.getBoundingClientRect();
+      const v = vbRef.current;
+      const cx = v.x + ((e.clientX - rect.left) / rect.width) * v.w;
+      const cy = v.y + ((e.clientY - rect.top) / rect.height) * v.h;
+      zoomBy(e.deltaY < 0 ? 0.85 : 1 / 0.85, cx, cy);
+    };
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
   // keyboard: Esc cancels a pending wire / deselects; R rotates and Del/Backspace deletes the selection
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -534,6 +618,15 @@ export function Board() {
         <button className={`add ${showBias ? 'on' : ''}`} disabled={view !== 'board'} onClick={() => setShowBias((v) => !v)} title="Overlay DC operating-point voltages">
           Bias
         </button>
+        <button className="add" disabled={view !== 'board'} onClick={() => zoomCenter(0.8)} title="Zoom in (or scroll the wheel over the board)">
+          ＋
+        </button>
+        <button className="add" disabled={view !== 'board'} onClick={() => zoomCenter(1.25)} title="Zoom out">
+          −
+        </button>
+        <button className="add" disabled={view !== 'board' || (vb.w >= BOARD_W && vb.x === 0 && vb.y === 0)} onClick={resetZoom} title="Fit the whole board">
+          Fit
+        </button>
         <span className="spacer" />
         <button className="add" onClick={saveBoard} title="Save to a named slot">
           Save
@@ -567,17 +660,13 @@ export function Board() {
       <svg
         ref={svgRef}
         className="board"
-        viewBox={`0 0 ${BOARD_W} ${BOARD_H}`}
-        style={{ aspectRatio: `${BOARD_W} / ${BOARD_H}` }}
+        viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
+        style={{ aspectRatio: `${BOARD_W} / ${BOARD_H}`, touchAction: 'none' }}
         onPointerMove={onMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
-        onPointerDown={() => {
-          setSelected(null);
-          setWireStart(null);
-          setWireCursor(null);
-        }}
+        onPointerDown={onBackgroundDown}
       >
         <rect x={0} y={0} width={BOARD_W} height={BOARD_H} fill="#c8a86a" rx={2} />
         {/* jumper wires (logical connections), drawn under the parts; click one to select it */}
