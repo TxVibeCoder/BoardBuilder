@@ -36,7 +36,7 @@ export interface ComponentParams {
   rsrc?: number; // source series impedance (Ω); small ≈ ideal
   ideal?: boolean; // source: ideal voltage (aux row) instead of Norton
   wave?: 'sine' | 'guitar' | 'dc' | 'noise' | 'pulse'; // source waveform; 'guitar' reads the external input sample; 'dc' = a constant supply rail (Vcc); 'noise' = uniform white noise ±amp; 'pulse' = bipolar square at freq
-  bjt?: 'NPN'; // transistor polarity (NPN only for now)
+  bjt?: 'NPN' | 'PNP'; // transistor polarity
   polarity?: boolean; // electrolytic cap orientation (display/warning only)
 }
 

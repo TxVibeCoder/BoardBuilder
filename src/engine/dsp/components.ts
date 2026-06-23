@@ -327,12 +327,14 @@ class PotStamper implements Stamper {
 }
 
 /**
- * Bipolar junction transistor — Ebers-Moll (transport form), NPN. Three terminals [c, b, e]; two
- * coupled diode junctions (base-emitter, base-collector) plus the current-gain coupling, so it is the
- * same Newton machinery as the diode, generalized to a 3×3 companion stamp. In forward-active
- * (Vbe ≳ 0.6 V, Vbc < 0) it gives Ic ≈ Is·e^(Vbe/Vt) and Ib ≈ Ic/βF — i.e. current gain βF — which is
- * what makes a common-emitter stage amplify. Currents are defined flowing INTO each terminal; the
- * emitter row is the negative sum (KCL closes inside the device). Teaching model, not SPICE-grade.
+ * Bipolar junction transistor — Ebers-Moll (transport form). Three terminals [c, b, e]; two coupled
+ * diode junctions (base-emitter, base-collector) plus the current-gain coupling, so it is the same
+ * Newton machinery as the diode, generalized to a 3×3 companion stamp. In forward-active it gives
+ * Ic ≈ Is·e^(Vbe/Vt) and Ib ≈ Ic/βF — i.e. current gain βF — which is what makes a common-emitter
+ * stage amplify. PNP is the exact mirror of NPN: the junction voltages and the terminal currents flip
+ * sign (s = ∓1), while the Jacobian is identical (the two sign flips cancel, s² = 1). Currents are
+ * defined flowing INTO each terminal; the emitter row is the negative sum (KCL closes inside the
+ * device). Teaching model, not SPICE-grade.
  */
 class BjtStamper implements Stamper {
   readonly nonlinear = true;
@@ -342,24 +344,25 @@ class BjtStamper implements Stamper {
   private readonly betaF = BJT_NPN.betaF;
   private readonly betaR = BJT_NPN.betaR;
   private readonly vt = THERMAL_VOLTAGE;
-  constructor(readonly id: string, readonly nodes: number[]) {} // [c, b, e]
+  constructor(readonly id: string, readonly nodes: number[], private readonly spec: ComponentSpec) {} // [c, b, e]
   stampLinear(): void {}
   stampNonlinear(ctx: StampContext): void {
     const nc = this.nodes[0]!;
     const nb = this.nodes[1]!;
     const ne = this.nodes[2]!;
     const vt = this.vt;
-    const vbe = nodeV(ctx.v, nb) - nodeV(ctx.v, ne);
-    const vbc = nodeV(ctx.v, nb) - nodeV(ctx.v, nc);
+    const s = (this.spec.params.bjt ?? 'NPN') === 'PNP' ? -1 : 1; // polarity: PNP mirrors NPN
+    const vbe = s * (nodeV(ctx.v, nb) - nodeV(ctx.v, ne));
+    const vbc = s * (nodeV(ctx.v, nb) - nodeV(ctx.v, nc));
     const f = Math.exp(clamp(vbe / vt, -ARG_MAX, ARG_MAX));
     const r = Math.exp(clamp(vbc / vt, -ARG_MAX, ARG_MAX));
     const gf = (this.is * f) / vt; // d(Is·e^Vbe)/dVbe
     const gr = (this.is * r) / vt; // d(Is·e^Vbc)/dVbc
     const grc = gr * (1 + 1 / this.betaR);
 
-    // terminal currents into the device
-    const ic = this.is * (f - r) - (this.is * (r - 1)) / this.betaR;
-    const ib = (this.is * (f - 1)) / this.betaF + (this.is * (r - 1)) / this.betaR;
+    // terminal currents into the device (flip sign for PNP; the Jacobian below is sign-independent)
+    const ic = s * (this.is * (f - r) - (this.is * (r - 1)) / this.betaR);
+    const ib = s * ((this.is * (f - 1)) / this.betaF + (this.is * (r - 1)) / this.betaR);
     const I = [ic, ib, -(ic + ib)];
 
     // Jacobian g[t][j] = dI_t/dV_j, j index 0=c,1=b,2=e (via Vbe=Vb−Ve, Vbc=Vb−Vc)
@@ -412,7 +415,7 @@ export function buildStampers(net: Netlist, compiled: CompiledNetlist): Stamper[
         out.push(new PotStamper(c.id, nodes, c));
         break;
       case 'bjt':
-        out.push(new BjtStamper(c.id, nodes));
+        out.push(new BjtStamper(c.id, nodes, c));
         break;
       default:
         throw new Error(`components: unsupported kind '${c.kind}'`);

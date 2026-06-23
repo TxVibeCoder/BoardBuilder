@@ -817,6 +817,19 @@ function Editor({ comp, onParam }: { comp: BoardComponent; onParam: (p: Partial<
           </label>
         </div>
       );
+    case 'bjt':
+      return (
+        <div className="ctl">
+          <label>Transistor</label>
+          <div className="seg">
+            {(['NPN', 'PNP'] as const).map((t) => (
+              <button key={t} className={(p.bjt ?? 'NPN') === t ? 'on' : ''} onClick={() => onParam({ bjt: t })}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
     case 'opamp':
       return <LogRow label="Supply ±Vsat" value={p.vsat ?? 9} min={1} max={18} fmt={(v) => `${v.toFixed(1)} V`} onChange={(v) => onParam({ vsat: v })} />;
     case 'source': {

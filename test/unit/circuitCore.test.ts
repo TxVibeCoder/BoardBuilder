@@ -401,3 +401,52 @@ describe('CircuitCore — BJT (Ebers-Moll) common-emitter amplifier', () => {
     expect(core.getState().components.some((c) => c.kind === 'bjt')).toBe(true);
   });
 });
+
+describe('CircuitCore — PNP transistor (the NPN mirror)', () => {
+  const pnp = (id: string, c: string, b: string, e: string): ComponentSpec => ({ id, kind: 'bjt', pins: [c, b, e], params: { bjt: 'PNP' } });
+  // PNP common-emitter off a NEGATIVE rail: bias ~−1.6 V, emitter sits ~0.65 V ABOVE base, collector mid-rail
+  const cePnp = (): Netlist =>
+    net([
+      dcSrc('VEE', 'vee', 'gnd', -9),
+      guitarSrc('SIG', 'vin', 'gnd'),
+      C('Cin', 'vin', 'base', 1e-6),
+      R('R1', 'vee', 'base', 47000),
+      R('R2', 'base', 'gnd', 10000),
+      R('Rc', 'vee', 'col', 4700),
+      R('Re', 'emit', 'gnd', 1000),
+      pnp('Q', 'col', 'base', 'emit'),
+      probe('col'),
+    ]);
+
+  it('biases on a negative rail (emitter above base), collector mid-rail, fault-free', () => {
+    const core = new CircuitCore(cePnp(), FS, { oversample: 1 });
+    core.reset();
+    const n = 6000;
+    core.processBlock(new Float64Array(n), new Float64Array(n), n);
+    const vc = core.nodeVoltage('col');
+    const vb = core.nodeVoltage('base');
+    const ve = core.nodeVoltage('emit');
+    expect(vc).toBeLessThan(-2.5); // active region between the −9 V rail and ground
+    expect(vc).toBeGreaterThan(-8);
+    expect(ve).toBeGreaterThan(vb); // PNP: emitter sits ABOVE the base (Veb > 0 ⇒ forward)
+    expect(ve - vb).toBeGreaterThan(0.4);
+    expect(core.flags & (FLAG_FLOATING | FLAG_NONFINITE)).toBe(0);
+  });
+
+  it('amplifies (collector AC swing several × the input)', () => {
+    const core = new CircuitCore(cePnp(), FS, { oversample: 1 });
+    core.reset();
+    const N = 9600;
+    const inb = new Float64Array(N);
+    for (let i = 0; i < N; i++) inb[i] = 0.05 * Math.sin((2 * Math.PI * 500 * i) / FS);
+    const out = new Float64Array(N);
+    core.processBlock(inb, out, N);
+    let mn = Infinity;
+    let mx = -Infinity;
+    for (let i = N - 2400; i < N; i++) {
+      if (out[i]! < mn) mn = out[i]!;
+      if (out[i]! > mx) mx = out[i]!;
+    }
+    expect((mx - mn) / (2 * 0.05)).toBeGreaterThan(3); // ≈ Rc/Re ≈ 4.7×
+  });
+});
