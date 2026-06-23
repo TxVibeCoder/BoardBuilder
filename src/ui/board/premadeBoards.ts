@@ -9,23 +9,11 @@
  * derives the engine netlist exactly as for a hand-built board.
  */
 
-import { COMPONENT_ART } from './componentArt';
-import { defaultParams, type BoardComponent, type BoardState, type PinRef } from './boardModel';
-import type { ComponentKind, ComponentParams } from '../../engine/dsp/netlist';
+import { makeBoard } from './boardBuild';
+import type { BoardState } from './boardModel';
 import { vcoBoard } from './synth/vcoBoard';
 import { ladderBoard } from './synth/ladderBoard';
 import * as adsr from './synth/adsrBoard';
-
-interface PartSpec {
-  id: string;
-  kind: ComponentKind;
-  x: number;
-  y: number;
-  rot?: number;
-  params?: ComponentParams;
-}
-/** A wire: [componentA, pinNameA, componentB, pinNameB] — connects two legs by their art pin names. */
-type WireSpec = [string, string, string, string];
 
 export interface PremadeCircuit {
   id: string;
@@ -34,38 +22,6 @@ export interface PremadeCircuit {
   /** Menu grouping label (e.g. 'Pedals & EQ' vs 'Synth'); defaults to the pedal group when unset. */
   group?: string;
   build: () => BoardState;
-}
-
-const FS = 48000;
-
-/** Resolve an art pin name → its netlist pin index for a given kind+params. */
-function pinIndexByName(kind: ComponentKind, params: ComponentParams, name: string): number {
-  const art = COMPONENT_ART[kind]?.(params);
-  const idx = art ? art.pins.findIndex((p) => p.name === name) : -1;
-  if (idx < 0) throw new Error(`premade: ${kind} has no pin '${name}'`);
-  return idx;
-}
-
-/** Build a BoardState from placed parts + named-pin wires (each wire becomes a jumper component). */
-function makeBoard(parts: PartSpec[], wires: WireSpec[]): BoardState {
-  const components: BoardComponent[] = parts.map((p) => ({
-    id: p.id,
-    kind: p.kind,
-    params: { ...defaultParams(p.kind), ...(p.params ?? {}) },
-    x: p.x,
-    y: p.y,
-    rot: p.rot,
-  }));
-  const byId = new Map(components.map((c) => [c.id, c]));
-  const ref = (compId: string, pinName: string): PinRef => {
-    const c = byId.get(compId);
-    if (!c) throw new Error(`premade: no component '${compId}'`);
-    return { componentId: compId, pinIndex: pinIndexByName(c.kind, c.params, pinName) };
-  };
-  wires.forEach((w, i) => {
-    components.push({ id: `W${i + 1}`, kind: 'jumper', params: {}, x: 0, y: 0, link: { a: ref(w[0], w[1]), b: ref(w[2], w[3]) } });
-  });
-  return { components, sampleRate: FS, nextId: 200 };
 }
 
 export const PREMADE_CIRCUITS: PremadeCircuit[] = [
