@@ -61,6 +61,21 @@ const PALETTE: { kind: ComponentKind; label: string }[] = [
   { kind: 'probe', label: 'Probe' },
 ];
 
+/** Friendly leg names per kind — shown upright on the SELECTED part so you can tell hot from ground,
+ *  anode from cathode, or C/B/E (even on a rotated part, where the baked art labels read sideways). */
+const PIN_LABELS: Partial<Record<ComponentKind, Record<string, string>>> = {
+  source: { hot: 'hot', gnd: 'gnd' },
+  resistor: { a: 'a', b: 'b' },
+  capacitor: { a: 'a', b: 'b' },
+  inductor: { a: 'a', b: 'b' },
+  diode: { a: 'anode', k: 'cathode' },
+  opamp: { plus: '+in', minus: '−in', out: 'out' },
+  pot: { a: 'a', wiper: 'wiper', b: 'b' },
+  bjt: { c: 'C', b: 'B', e: 'E' },
+  probe: { tip: 'tip' },
+};
+const pinLabel = (kind: ComponentKind, name: string): string => PIN_LABELS[kind]?.[name] ?? name;
+
 /** Premade circuits grouped by their menu group (pedals vs synth) for the Load dropdown's optgroups. */
 const PREMADE_GROUPS: [string, { id: string; name: string }[]][] = (() => {
   const g: Record<string, { id: string; name: string }[]> = {};
@@ -608,6 +623,23 @@ export function Board() {
             </g>
           );
         })}
+        {/* leg labels for the SELECTED part — upright so they stay readable on a rotated part */}
+        {sel &&
+          sel.kind !== 'jumper' &&
+          pinsOf(sel).map((pin) => {
+            const label = pinLabel(sel.kind, pin.name);
+            const w = label.length * 0.95 + 1.2;
+            const above = pin.y > 7; // flip below if the pin is near the top edge
+            const ty = above ? pin.y - 1.9 : pin.y + 3.4;
+            return (
+              <g key={`pinlbl-${pin.pinIndex}`} pointerEvents="none">
+                <rect x={pin.x - w / 2} y={ty - 1.7} width={w} height={2.2} rx={0.4} fill="#15100a" opacity={0.82} />
+                <text x={pin.x} y={ty} fontSize={1.5} fill="#ffe2a6" textAnchor="middle">
+                  {label}
+                </text>
+              </g>
+            );
+          })}
         {/* live "release here to connect" markers while dragging a part */}
         {snapTargets.map((t, i) => (
           <circle key={`snap-${i}`} cx={t.x} cy={t.y} r={1.7} fill="none" stroke="#7fe08a" strokeWidth={0.45} strokeDasharray="1 0.7" />
@@ -698,8 +730,52 @@ function Editor({ comp, onParam }: { comp: BoardComponent; onParam: (p: Partial<
       );
     case 'opamp':
       return <LogRow label="Supply ±Vsat" value={p.vsat ?? 9} min={1} max={18} fmt={(v) => `${v.toFixed(1)} V`} onChange={(v) => onParam({ vsat: v })} />;
-    case 'source':
-      return <LogRow label="Input level" value={p.amp ?? 1} min={0.05} max={5} fmt={(v) => `${v.toFixed(2)}×`} onChange={(v) => onParam({ amp: v })} />;
+    case 'source': {
+      const wave = p.wave ?? 'guitar';
+      const WAVES: { id: NonNullable<ComponentParams['wave']>; label: string }[] = [
+        { id: 'guitar', label: 'Input' },
+        { id: 'sine', label: 'Sine' },
+        { id: 'pulse', label: 'Pulse' },
+        { id: 'noise', label: 'Noise' },
+        { id: 'dc', label: 'DC rail' },
+      ];
+      return (
+        <>
+          <div className="ctl">
+            <label>Source</label>
+            <div className="seg">
+              {WAVES.map((w) => (
+                <button key={w.id} className={wave === w.id ? 'on' : ''} onClick={() => onParam({ wave: w.id })}>
+                  {w.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {wave === 'dc' ? (
+            <LogRow label="Rail voltage" value={p.amp ?? 9} min={1} max={18} fmt={(v) => `${v.toFixed(1)} V`} onChange={(v) => onParam({ amp: v })} />
+          ) : (
+            <LogRow
+              label={wave === 'guitar' ? 'Input level' : 'Amplitude'}
+              value={p.amp ?? 1}
+              min={0.05}
+              max={5}
+              fmt={(v) => `${v.toFixed(2)}${wave === 'guitar' ? '×' : ' V'}`}
+              onChange={(v) => onParam({ amp: v })}
+            />
+          )}
+          {(wave === 'sine' || wave === 'pulse') && (
+            <LogRow
+              label="Frequency"
+              value={p.freq ?? 1000}
+              min={20}
+              max={20000}
+              fmt={(v) => (v >= 1000 ? `${(v / 1000).toFixed(2)} kHz` : `${v.toFixed(0)} Hz`)}
+              onChange={(v) => onParam({ freq: v })}
+            />
+          )}
+        </>
+      );
+    }
     default:
       return <div className="ctl-head">no adjustable values</div>;
   }
